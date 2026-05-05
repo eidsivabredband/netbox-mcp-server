@@ -47,6 +47,7 @@ In-scope contributions we're especially keen to see:
 - Adding new core NetBox object types to `src/netbox_mcp_server/netbox_types.py`
 - Compatibility fixes for new NetBox versions
 - Dependency updates
+- Improvements to the [netbox-custom-objects](https://github.com/netboxlabs/netbox-custom-objects) plugin integration (the `custom-objects.*` tools are an explicit carve-out from the no-plugin-types rule)
 
 ## Submitting pull requests
 

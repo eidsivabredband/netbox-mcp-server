@@ -20,7 +20,10 @@ The server is intentionally simple — easy to get started with, hard to misuse 
 | `netbox_get_changelogs` | Retrieves change history records (audit trail) based on filters |
 | `netbox_search_objects` | Performs a global search across multiple object types |
 | `netbox_custom_object_list` | Lists instances of a custom object type (requires custom-objects plugin) |
+| `netbox_custom_object_get_by_id` | Gets a specific custom object instance by ID |
 | `netbox_custom_object_create` | Creates an instance of a custom object type (requires `NETBOX_WRITE_TOKEN`) |
+| `netbox_custom_object_update` | Updates a custom object instance — partial update (requires `NETBOX_WRITE_TOKEN`) |
+| `netbox_custom_object_delete` | Deletes a custom object instance (requires `NETBOX_WRITE_TOKEN`) |
 | `netbox_custom_object_type_create` | Defines a new custom object type — development use (requires `NETBOX_WRITE_TOKEN`) |
 | `netbox_custom_object_type_field_create` | Adds a field to a custom object type — development use (requires `NETBOX_WRITE_TOKEN`) |
 

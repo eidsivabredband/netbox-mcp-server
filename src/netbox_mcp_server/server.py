@@ -560,6 +560,91 @@ def netbox_custom_object_list(
 
 
 @mcp.tool
+def netbox_custom_object_get_by_id(
+    object_type_slug: str,
+    object_id: int,
+    fields: list[str] | None = None,
+    brief: bool = False,
+) -> dict:
+    """
+    Get a single custom object instance by ID from the NetBox custom-objects plugin.
+
+    Args:
+        object_type_slug: The slug of the custom object type (e.g. "fiber-splice").
+                          Use netbox_get_objects('custom-objects.customobjecttype', {}) to discover
+                          available types and their slugs.
+        object_id: The numeric ID of the custom object instance.
+        fields: Optional list of specific fields to return. Always specify to minimize token usage.
+        brief: Return only minimal representation of the object.
+
+    Returns:
+        The custom object instance dict.
+    """
+    endpoint = f"plugins/custom-objects/{object_type_slug}/{object_id}"
+    params: dict = {}
+    if fields:
+        params["fields"] = ",".join(fields)
+    if brief:
+        params["brief"] = "1"
+    return netbox.get(endpoint, params=params)
+
+
+@mcp.tool
+def netbox_custom_object_update(
+    object_type_slug: str,
+    object_id: int,
+    data: dict,
+) -> dict:
+    """
+    Update a custom object instance in NetBox (partial update).
+
+    Requires NETBOX_WRITE_TOKEN to be configured.
+
+    Args:
+        object_type_slug: The slug of the custom object type (e.g. "fiber-splice").
+        object_id: The numeric ID of the custom object instance to update.
+        data: Fields to update. Only the provided keys are changed (PATCH semantics).
+
+              Example for a "fiber-splice" type:
+              {"fiber_count": 96}
+
+    Returns:
+        The updated custom object dict.
+    """
+    if netbox_write is None:
+        raise ValueError(
+            "Write operations require NETBOX_WRITE_TOKEN to be configured. "
+            "Set the NETBOX_WRITE_TOKEN environment variable with a write-enabled API token."
+        )
+    return netbox_write.update(f"plugins/custom-objects/{object_type_slug}", object_id, data)
+
+
+@mcp.tool
+def netbox_custom_object_delete(
+    object_type_slug: str,
+    object_id: int,
+) -> bool:
+    """
+    Delete a custom object instance from NetBox.
+
+    Requires NETBOX_WRITE_TOKEN to be configured.
+
+    Args:
+        object_type_slug: The slug of the custom object type (e.g. "fiber-splice").
+        object_id: The numeric ID of the custom object instance to delete.
+
+    Returns:
+        True if deletion was successful.
+    """
+    if netbox_write is None:
+        raise ValueError(
+            "Write operations require NETBOX_WRITE_TOKEN to be configured. "
+            "Set the NETBOX_WRITE_TOKEN environment variable with a write-enabled API token."
+        )
+    return netbox_write.delete(f"plugins/custom-objects/{object_type_slug}", object_id)
+
+
+@mcp.tool
 def netbox_custom_object_type_create(
     name: str,
     description: str = "",
