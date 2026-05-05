@@ -1,4 +1,12 @@
 NETBOX_OBJECT_TYPES = {
+    "custom-objects.customobjecttype": {
+        "name": "CustomObjectType",
+        "endpoint": "plugins/custom-objects/custom-object-types",
+    },
+    "custom-objects.customobjecttypefield": {
+        "name": "CustomObjectTypeField",
+        "endpoint": "plugins/custom-objects/custom-object-type-fields",
+    },
     "circuits.circuit": {
         "name": "Circuit",
         "endpoint": "circuits/circuits",

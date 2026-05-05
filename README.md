@@ -15,11 +15,16 @@ The server is intentionally simple — easy to get started with, hard to misuse 
 
 | Tool | Description |
 |------|-------------|
-| get_objects | Retrieves NetBox core objects based on their type and filters |
-| get_object_by_id | Gets detailed information about a specific NetBox object by its ID |
-| get_changelogs | Retrieves change history records (audit trail) based on filters |
+| `netbox_get_objects` | Retrieves NetBox objects based on their type and filters |
+| `netbox_get_object_by_id` | Gets detailed information about a specific NetBox object by its ID |
+| `netbox_get_changelogs` | Retrieves change history records (audit trail) based on filters |
+| `netbox_search_objects` | Performs a global search across multiple object types |
+| `netbox_custom_object_list` | Lists instances of a custom object type (requires custom-objects plugin) |
+| `netbox_custom_object_create` | Creates an instance of a custom object type (requires `NETBOX_WRITE_TOKEN`) |
+| `netbox_custom_object_type_create` | Defines a new custom object type — development use (requires `NETBOX_WRITE_TOKEN`) |
+| `netbox_custom_object_type_field_create` | Adds a field to a custom object type — development use (requires `NETBOX_WRITE_TOKEN`) |
 
-> Note: The set of supported object types is explicitly limited to core NetBox objects. Plugin object types and advanced features (GraphQL, dynamic model discovery, etc.) are deliberately out of scope — see [CONTRIBUTING.md](CONTRIBUTING.md) for the full scope statement and rationale.
+> Note: Core object types are explicitly limited to standard NetBox objects. The `custom-objects.*` types require the [netbox-custom-objects](https://github.com/netboxlabs/netbox-custom-objects) plugin to be installed.
 
 ## Usage
 
@@ -167,7 +172,8 @@ The server supports multiple configuration sources with the following precedence
 | Setting | Type | Default | Required | Description |
 |---------|------|---------|----------|-------------|
 | `NETBOX_URL` | URL | - | Yes | Base URL of your NetBox instance (e.g., https://netbox.example.com/) |
-| `NETBOX_TOKEN` | String | - | Yes | API token for authentication |
+| `NETBOX_TOKEN` | String | - | Yes | Read-only API token for authentication |
+| `NETBOX_WRITE_TOKEN` | String | - | No | Write-enabled API token — required for `netbox_custom_object_*` write tools |
 | `TRANSPORT` | `stdio` \| `http` | `stdio` | No | MCP transport protocol |
 | `HOST` | String | `127.0.0.1` | If HTTP | Host address for HTTP server |
 | `PORT` | Integer | `8000` | If HTTP | Port for HTTP server |
@@ -225,7 +231,10 @@ Create a `.env` file in the project root:
 ```env
 # Core NetBox Configuration
 NETBOX_URL=https://netbox.example.com/
-NETBOX_TOKEN=your_api_token_here
+NETBOX_TOKEN=your_read_only_token_here
+
+# Write token — required for custom object create tools (optional)
+# NETBOX_WRITE_TOKEN=your_write_token_here
 
 # Transport Configuration (optional, defaults to stdio)
 TRANSPORT=stdio
@@ -309,6 +318,45 @@ docker run --rm \
 ```
 
 The server will be accessible at `http://localhost:8000/mcp` for MCP clients. You can connect to it using your preferred method.
+
+## Custom Objects Plugin
+
+The server supports the [netbox-custom-objects](https://github.com/netboxlabs/netbox-custom-objects) plugin for reading and creating custom object types and instances.
+
+### Reading custom objects
+
+Custom object types and their fields are accessible via `netbox_get_objects` once the plugin is installed:
+
+```text
+> List all custom object types
+> Show me fields for the "fiber-splice" object type
+> Get all fiber-splice instances at site "NYC-DC1"
+```
+
+### Creating custom objects (requires `NETBOX_WRITE_TOKEN`)
+
+Set a write-enabled token to unlock the three write tools:
+
+```bash
+NETBOX_URL=https://netbox.example.com/ \
+NETBOX_TOKEN=<read-only-token> \
+NETBOX_WRITE_TOKEN=<write-token> \
+uv run netbox-mcp-server
+```
+
+**Development workflow** — define a new object type and its fields:
+
+```text
+> Create a custom object type called "Fiber Splice" with plural "Fiber Splices"
+> Add a required integer field "fiber_count" to the Fiber Splice type
+> Add an object field "site" linked to dcim.site to the Fiber Splice type
+```
+
+**Production workflow** — create instances of an existing type:
+
+```text
+> Create a fiber-splice instance with fiber_count=48 at site ID 12
+```
 
 ## Development
 

@@ -22,7 +22,10 @@ class Settings(BaseSettings):
     """Base URL of the NetBox instance (e.g., https://netbox.example.com/)"""
 
     netbox_token: SecretStr
-    """API token for NetBox authentication (treated as secret)"""
+    """Read-only API token for NetBox authentication (treated as secret)"""
+
+    netbox_write_token: SecretStr | None = None
+    """Write API token for NetBox (required for create/update/delete operations)"""
 
     # ===== Transport Settings =====
     transport: Literal["stdio", "http"] = "stdio"
@@ -86,6 +89,7 @@ class Settings(BaseSettings):
         return {
             "netbox_url": str(self.netbox_url),
             "netbox_token": "***REDACTED***",
+            "netbox_write_token": "***REDACTED***" if self.netbox_write_token else "not set",
             "transport": self.transport,
             "host": self.host if self.transport == "http" else "N/A",
             "port": self.port if self.transport == "http" else "N/A",

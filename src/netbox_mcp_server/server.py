@@ -32,7 +32,12 @@ def parse_cli_args() -> dict[str, Any]:
     parser.add_argument(
         "--netbox-token",
         type=str,
-        help="API token for NetBox authentication",
+        help="Read-only API token for NetBox authentication",
+    )
+    parser.add_argument(
+        "--netbox-write-token",
+        type=str,
+        help="Write API token for NetBox (enables create/update/delete tools)",
     )
 
     # Transport settings
@@ -84,6 +89,8 @@ def parse_cli_args() -> dict[str, Any]:
         overlay["netbox_url"] = args.netbox_url
     if args.netbox_token is not None:
         overlay["netbox_token"] = args.netbox_token
+    if args.netbox_write_token is not None:
+        overlay["netbox_write_token"] = args.netbox_write_token
     if args.transport is not None:
         overlay["transport"] = args.transport
     if args.host is not None:
@@ -112,6 +119,7 @@ DEFAULT_SEARCH_TYPES = [
 
 mcp = FastMCP("NetBox")
 netbox = None
+netbox_write = None
 
 
 def validate_filters(filters: dict) -> None:
@@ -502,6 +510,205 @@ def netbox_search_objects(
     return results
 
 
+@mcp.tool
+def netbox_custom_object_list(
+    object_type_slug: str,
+    filters: dict,
+    fields: list[str] | None = None,
+    brief: bool = False,
+    limit: Annotated[int, Field(default=5, ge=1, le=100)] = 5,
+    offset: Annotated[int, Field(default=0, ge=0)] = 0,
+) -> dict:
+    """
+    List instances of a custom object type from the NetBox custom-objects plugin.
+
+    Args:
+        object_type_slug: The slug of the custom object type (e.g. "fiber-splice", "dhcp-scope").
+                          Use netbox_get_objects('custom-objects.customobjecttype', {}) to discover
+                          available types and their slugs.
+        filters: dict of filters to apply (same filter rules as netbox_get_objects)
+        fields: Optional list of specific fields to return. Always specify to minimize token usage.
+        brief: Return only minimal representation of each object.
+        limit: Maximum results to return (default 5, max 100)
+        offset: Skip this many results for pagination (default 0)
+
+    Returns:
+        Paginated response dict with count, next, previous, and results keys.
+    """
+    endpoint = f"plugins/custom-objects/{object_type_slug}"
+    params = filters.copy()
+    params["limit"] = limit
+    params["offset"] = offset
+    if fields:
+        params["fields"] = ",".join(fields)
+    if brief:
+        params["brief"] = "1"
+    return netbox.get(endpoint, params=params)
+
+
+@mcp.tool
+def netbox_custom_object_type_create(
+    name: str,
+    description: str = "",
+    verbose_name: str = "",
+    verbose_name_plural: str = "",
+) -> dict:
+    """
+    Create a new custom object type in NetBox (development use).
+
+    Requires NETBOX_WRITE_TOKEN to be configured.
+
+    After creating a type, add fields to it with netbox_custom_object_type_field_create,
+    then create instances with netbox_custom_object_create.
+
+    Args:
+        name: Name of the custom object type (e.g. "Fiber Splice", "DHCP Scope").
+              The slug is auto-derived from the name.
+        description: Optional description of what this object type represents.
+        verbose_name: Optional singular display name override (defaults to name).
+        verbose_name_plural: Optional plural display name override (e.g. "Fiber Splices").
+
+    Returns:
+        The created CustomObjectType dict including its id and slug.
+    """
+    if netbox_write is None:
+        raise ValueError(
+            "Write operations require NETBOX_WRITE_TOKEN to be configured. "
+            "Set the NETBOX_WRITE_TOKEN environment variable with a write-enabled API token."
+        )
+    data: dict = {"name": name}
+    if description:
+        data["description"] = description
+    if verbose_name:
+        data["verbose_name"] = verbose_name
+    if verbose_name_plural:
+        data["verbose_name_plural"] = verbose_name_plural
+    return netbox_write.create("plugins/custom-objects/custom-object-types", data)
+
+
+CUSTOM_OBJECT_FIELD_TYPES = (
+    "text",
+    "longtext",
+    "integer",
+    "decimal",
+    "boolean",
+    "date",
+    "datetime",
+    "url",
+    "json",
+    "select",
+    "multiselect",
+    "object",
+    "multiobject",
+)
+
+
+@mcp.tool
+def netbox_custom_object_type_field_create(
+    custom_object_type_id: int,
+    name: str,
+    label: str,
+    type: str,
+    required: bool = False,
+    description: str = "",
+    primary: bool = False,
+    unique: bool = False,
+    default: str = "",
+    choice_set_id: int | None = None,
+    related_object_type: str | None = None,
+) -> dict:
+    """
+    Add a field to an existing custom object type (development use).
+
+    Requires NETBOX_WRITE_TOKEN to be configured.
+
+    Args:
+        custom_object_type_id: ID of the CustomObjectType to add the field to.
+        name: URL-friendly field identifier (snake_case, e.g. "fiber_count").
+        label: Human-readable display name (e.g. "Fiber Count").
+        type: Field data type. Must be one of:
+              text, longtext, integer, decimal, boolean, date, datetime,
+              url, json, select, multiselect, object, multiobject
+        required: Whether the field is required when creating instances (default False).
+        description: Optional description of the field's purpose.
+        primary: If True, this field's value is used as the object's display name.
+        unique: Enforce uniqueness across all instances (not valid for multiobject or boolean).
+        default: Default value for the field (as string).
+        choice_set_id: ID of a ChoiceSet — required for select and multiselect types.
+        related_object_type: For object/multiobject types, the related NetBox object type
+                             in "app_label.model" format (e.g. "dcim.device", "ipam.prefix").
+                             Use "custom-objects.{slug}" to reference another custom object type.
+
+    Returns:
+        The created CustomObjectTypeField dict.
+    """
+    if netbox_write is None:
+        raise ValueError(
+            "Write operations require NETBOX_WRITE_TOKEN to be configured. "
+            "Set the NETBOX_WRITE_TOKEN environment variable with a write-enabled API token."
+        )
+    if type not in CUSTOM_OBJECT_FIELD_TYPES:
+        valid = ", ".join(CUSTOM_OBJECT_FIELD_TYPES)
+        raise ValueError(f"Invalid field type '{type}'. Must be one of: {valid}")
+    if type in ("select", "multiselect") and choice_set_id is None:
+        raise ValueError(f"Field type '{type}' requires choice_set_id to be set.")
+    if type in ("object", "multiobject") and related_object_type is None:
+        raise ValueError(f"Field type '{type}' requires related_object_type to be set.")
+
+    data: dict = {
+        "custom_object_type": custom_object_type_id,
+        "name": name,
+        "label": label,
+        "type": type,
+        "required": required,
+    }
+    if description:
+        data["description"] = description
+    if primary:
+        data["primary"] = primary
+    if unique:
+        data["unique"] = unique
+    if default:
+        data["default"] = default
+    if choice_set_id is not None:
+        data["choice_set"] = choice_set_id
+    if related_object_type is not None:
+        data["related_object_type"] = related_object_type
+    return netbox_write.create("plugins/custom-objects/custom-object-type-fields", data)
+
+
+@mcp.tool
+def netbox_custom_object_create(
+    object_type_slug: str,
+    data: dict,
+) -> dict:
+    """
+    Create an instance of a custom object type in NetBox.
+
+    Requires NETBOX_WRITE_TOKEN to be configured.
+
+    Args:
+        object_type_slug: The slug of the custom object type (e.g. "fiber-splice").
+                          Use netbox_get_objects('custom-objects.customobjecttype', {}) to discover
+                          available types and their slugs.
+        data: Field values for the new object. Keys must match the field names defined
+              on the custom object type. For object/multiobject fields, provide the
+              related object's ID as the value.
+
+              Example for a "fiber-splice" type with fields "location" and "fiber_count":
+              {"location": 12, "fiber_count": 48}
+
+    Returns:
+        The created custom object dict including its id and all field values.
+    """
+    if netbox_write is None:
+        raise ValueError(
+            "Write operations require NETBOX_WRITE_TOKEN to be configured. "
+            "Set the NETBOX_WRITE_TOKEN environment variable with a write-enabled API token."
+        )
+    return netbox_write.create(f"plugins/custom-objects/{object_type_slug}", data)
+
+
 def _get_endpoint_info(object_type: str) -> tuple[str, str | None]:
     """
     Returns (endpoint, fallback_endpoint) for the given object type.
@@ -522,7 +729,7 @@ def _get_endpoint_info(object_type: str) -> tuple[str, str | None]:
 
 def main() -> None:
     """Main entry point for the MCP server."""
-    global netbox
+    global netbox, netbox_write
 
     cli_overlay: dict[str, Any] = parse_cli_args()
 
@@ -565,10 +772,24 @@ def main() -> None:
             token=settings.netbox_token.get_secret_value(),
             verify_ssl=settings.verify_ssl,
         )
-        logger.debug("NetBox client initialized successfully")
+        logger.debug("NetBox read client initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize NetBox client: {e}")
         sys.exit(1)
+
+    if settings.netbox_write_token:
+        try:
+            netbox_write = NetBoxRestClient(
+                url=str(settings.netbox_url),
+                token=settings.netbox_write_token.get_secret_value(),
+                verify_ssl=settings.verify_ssl,
+            )
+            logger.info("NetBox write client initialized — write tools enabled")
+        except Exception as e:
+            logger.error(f"Failed to initialize NetBox write client: {e}")
+            sys.exit(1)
+    else:
+        logger.info("NETBOX_WRITE_TOKEN not set — write tools disabled")
 
     try:
         if settings.transport == "stdio":
