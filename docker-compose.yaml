@@ -1,0 +1,79 @@
+services:
+  netbox: &netbox
+    image: eidsivabredbandcr.azurecr.io/eidsiva.netbox:0.52.0
+    depends_on:
+      - postgres
+      - redis
+    user: "netbox:root"
+    ports:
+      - 80:8080
+    healthcheck:
+      test: curl -f http://localhost:8080/login/ || exit 1
+      start_period: 90s
+      timeout: 3s
+      interval: 15s
+    volumes:
+      - ./local_env/configuration.py:/etc/netbox/config/configuration.py:z,ro
+  netbox-worker:
+    <<: *netbox
+    ports: [] # no ports for the worker
+    depends_on:
+      netbox:
+        condition: service_healthy
+    command:
+      - /opt/netbox/venv/bin/python
+      - /opt/netbox/netbox/manage.py
+      - rqworker
+    healthcheck:
+      test: ps -aux | grep -v grep | grep -q rqworker || exit 1
+      start_period: 20s
+      timeout: 3s
+      interval: 15s
+
+  # postgres
+  postgres:
+    image: docker.io/postgres:18-alpine
+    healthcheck:
+      test: pg_isready -q -t 2 -d $$POSTGRES_DB -U $$POSTGRES_USER
+      start_period: 20s
+      timeout: 30s
+      interval: 10s
+      retries: 5
+    env_file: ./local_env/postgres.env
+    volumes:
+      - netbox-postgres:/var/lib/postgresql
+
+  # redis
+  redis:
+    image: docker.io/valkey/valkey:9.0-alpine
+    command:
+      - sh
+      - -c # this is to evaluate the $REDIS_PASSWORD from the env
+      - valkey-server --appendonly yes --requirepass $$REDIS_PASSWORD ## $$ because of docker-compose
+    healthcheck:
+      test: '[ $$(valkey-cli --pass "$${REDIS_PASSWORD}" ping) = ''PONG'' ]'
+      start_period: 5s
+      timeout: 3s
+      interval: 1s
+      retries: 5
+    env_file: ./local_env/redis.env
+    volumes:
+      - netbox-redis-data:/data
+
+  netbox-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      pull: true
+    ports:
+      - 8081:8080
+    depends_on:
+      netbox:
+        condition: service_healthy
+    env_file: ./local_env/netbox-mcp.env
+
+volumes:
+  netbox-postgres:
+    driver: local
+  netbox-redis-data:
+    driver: local
