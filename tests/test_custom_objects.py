@@ -343,12 +343,20 @@ def test_field_create_select_with_choice_set():
 def test_field_create_object_with_related_type():
     mock_write = MagicMock()
     mock_write.create.return_value = {"id": 1}
-    with patch("netbox_mcp_server.server.netbox_write", mock_write):
+    mock_read = MagicMock()
+    mock_read.get.return_value = {"results": [{"id": 7}]}
+    with patch("netbox_mcp_server.server.netbox_write", mock_write), \
+         patch("netbox_mcp_server.server.netbox", mock_read):
         netbox_custom_object_type_field_create(
             1, "site", "Site", "object", related_object_type="dcim.site"
         )
+    mock_read.get.assert_called_once_with(
+        "core/object-types", params={"app_label": "dcim", "model": "site"}
+    )
     sent_data = mock_write.create.call_args.args[1]
-    assert sent_data["related_object_type"] == "dcim.site"
+    assert sent_data["app_label"] == "dcim"
+    assert sent_data["model"] == "site"
+    assert "related_object_type" not in sent_data
 
 
 def test_field_create_all_valid_types():

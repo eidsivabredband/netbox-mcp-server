@@ -701,6 +701,23 @@ CUSTOM_OBJECT_FIELD_TYPES = (
 )
 
 
+def _parse_related_object_type(app_label_model: str) -> tuple[str, str]:
+    """Parse an 'app_label.model' string into (app_label, model), validating it exists."""
+    parts = app_label_model.split(".", 1)
+    if len(parts) != 2:
+        raise ValueError(
+            f"related_object_type must be in 'app_label.model' format, got: '{app_label_model}'"
+        )
+    app_label, model = parts
+    response = netbox.get("core/object-types", params={"app_label": app_label, "model": model})
+    if not response.get("results"):
+        raise ValueError(
+            f"No NetBox ObjectType found for '{app_label_model}'. "
+            "Check that the app_label and model name are correct."
+        )
+    return app_label, model
+
+
 @mcp.tool
 def netbox_custom_object_type_field_create(
     custom_object_type_id: int,
@@ -771,7 +788,9 @@ def netbox_custom_object_type_field_create(
     if choice_set_id is not None:
         data["choice_set"] = choice_set_id
     if related_object_type is not None:
-        data["related_object_type"] = related_object_type
+        app_label, model = _parse_related_object_type(related_object_type)
+        data["app_label"] = app_label
+        data["model"] = model
     return netbox_write.create("plugins/custom-objects/custom-object-type-fields", data)
 
 

@@ -247,7 +247,8 @@ class NetBoxRestClient(NetBoxClientBase):
         """
         url = self._build_url(endpoint)
         response = self.session.post(url, json=data)
-        response.raise_for_status()
+        if not response.is_success:
+            raise ValueError(f"POST {url} failed {response.status_code}: {response.text}")
         return response.json()
 
     def update(self, endpoint: str, id: int, data: dict[str, Any]) -> dict[str, Any]:
