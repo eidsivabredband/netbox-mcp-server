@@ -524,6 +524,143 @@ def netbox_search_objects(
 
 
 @mcp.tool
+def netbox_get_object_schema(object_type: str) -> dict:
+    """
+    Get the field schema for a NetBox object type.
+
+    Use this before netbox_create_object or netbox_update_object to discover what
+    fields are available, which are required, and what data types they expect.
+
+    Args:
+        object_type: The NetBox object type (e.g. "dcim.device", "ipam.prefix").
+                     Must be a valid type from the NETBOX_OBJECT_TYPES registry.
+
+    Returns:
+        Dict keyed by HTTP method (e.g. "POST") where each value is a dict of
+        field name → field descriptor. Each descriptor includes:
+        - type: Data type ("string", "integer", "boolean", "nested object", "choice", etc.)
+        - required: True if the field must be provided when creating an object
+        - read_only: True if the field cannot be written (e.g. "id", "created")
+        - label: Human-readable display name
+        - choices: List of {"value", "display"} dicts for choice fields
+        - max_length: Maximum string length where applicable
+
+    Example:
+        schema = netbox_get_object_schema("dcim.site")
+        required_fields = [
+            name for name, info in schema["POST"].items()
+            if info.get("required") and not info.get("read_only")
+        ]
+    """
+    if object_type not in NETBOX_OBJECT_TYPES:
+        valid_types = "\n".join(f"- {t}" for t in sorted(NETBOX_OBJECT_TYPES.keys()))
+        raise ValueError(f"Invalid object_type. Must be one of:\n{valid_types}")
+
+    endpoint, _ = _get_endpoint_info(object_type)
+    return netbox.options(endpoint)
+
+
+@mcp.tool
+def netbox_create_object(object_type: str, data: dict) -> dict:
+    """
+    Create a new object in NetBox.
+
+    Requires NETBOX_WRITE_TOKEN to be configured.
+
+    Use netbox_get_object_schema first to discover required fields and their types.
+    Slugs (where required) are typically derived from the name: lowercase,
+    spaces and special characters replaced with hyphens.
+
+    Args:
+        object_type: The NetBox object type (e.g. "dcim.site", "ipam.vlan").
+                     Must be a valid type from the NETBOX_OBJECT_TYPES registry.
+        data: Field values for the new object. Required fields vary by type —
+              use netbox_get_object_schema to see what is required.
+
+              Examples:
+              - dcim.site:   {"name": "Oslo DC", "slug": "oslo-dc", "status": "active"}
+              - ipam.vlan:   {"name": "mgmt", "vid": 100, "status": "active"}
+              - dcim.device: {"name": "router-01", "site": 1, "device_type": 5, "role": 3}
+
+    Returns:
+        The created object dict including its assigned id.
+    """
+    if object_type not in NETBOX_OBJECT_TYPES:
+        valid_types = "\n".join(f"- {t}" for t in sorted(NETBOX_OBJECT_TYPES.keys()))
+        raise ValueError(f"Invalid object_type. Must be one of:\n{valid_types}")
+    if netbox_write is None:
+        raise ValueError(
+            "Write operations require NETBOX_WRITE_TOKEN to be configured. "
+            "Set the NETBOX_WRITE_TOKEN environment variable with a write-enabled API token."
+        )
+    endpoint, _ = _get_endpoint_info(object_type)
+    return netbox_write.create(endpoint, data)
+
+
+@mcp.tool
+def netbox_update_object(object_type: str, object_id: int, data: dict) -> dict:
+    """
+    Update an existing NetBox object (partial update).
+
+    Requires NETBOX_WRITE_TOKEN to be configured.
+
+    Only the fields provided in data are changed; all other fields are left untouched
+    (PATCH semantics). Use netbox_get_object_by_id first to inspect current values.
+
+    Args:
+        object_type: The NetBox object type (e.g. "dcim.device", "ipam.ipaddress").
+                     Must be a valid type from the NETBOX_OBJECT_TYPES registry.
+        object_id: The numeric ID of the object to update.
+        data: Fields to update. Only provided keys are changed.
+
+              Examples:
+              - Change a device's status:  {"status": "planned"}
+              - Update a VLAN description: {"description": "Management network"}
+              - Reassign a device's site:  {"site": 7}
+
+    Returns:
+        The updated object dict.
+    """
+    if object_type not in NETBOX_OBJECT_TYPES:
+        valid_types = "\n".join(f"- {t}" for t in sorted(NETBOX_OBJECT_TYPES.keys()))
+        raise ValueError(f"Invalid object_type. Must be one of:\n{valid_types}")
+    if netbox_write is None:
+        raise ValueError(
+            "Write operations require NETBOX_WRITE_TOKEN to be configured. "
+            "Set the NETBOX_WRITE_TOKEN environment variable with a write-enabled API token."
+        )
+    endpoint, _ = _get_endpoint_info(object_type)
+    return netbox_write.update(endpoint, object_id, data)
+
+
+@mcp.tool
+def netbox_delete_object(object_type: str, object_id: int) -> bool:
+    """
+    Delete an object from NetBox.
+
+    Requires NETBOX_WRITE_TOKEN to be configured.
+
+    Args:
+        object_type: The NetBox object type (e.g. "dcim.device", "ipam.ipaddress").
+                     Must be a valid type from the NETBOX_OBJECT_TYPES registry.
+        object_id: The numeric ID of the object to delete.
+
+    Returns:
+        True if deletion was successful.
+    """
+    if object_type not in NETBOX_OBJECT_TYPES:
+        valid_types = "\n".join(f"- {t}" for t in sorted(NETBOX_OBJECT_TYPES.keys()))
+        raise ValueError(f"Invalid object_type. Must be one of:\n{valid_types}")
+    if netbox_write is None:
+        raise ValueError(
+            "Write operations require NETBOX_WRITE_TOKEN to be configured. "
+            "Set the NETBOX_WRITE_TOKEN environment variable with a write-enabled API token."
+        )
+    endpoint, _ = _get_endpoint_info(object_type)
+    return netbox_write.delete(endpoint, object_id)
+
+
+@mcp.tool
 def netbox_custom_object_list(
     object_type_slug: str,
     filters: dict,

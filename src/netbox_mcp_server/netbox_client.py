@@ -132,6 +132,19 @@ class NetBoxClientBase(abc.ABC):
         """
         pass
 
+    @abc.abstractmethod
+    def options(self, endpoint: str) -> dict[str, Any]:
+        """
+        Retrieve schema metadata for an endpoint via HTTP OPTIONS.
+
+        Args:
+            endpoint: The API endpoint (e.g., 'dcim/sites', 'ipam/prefixes')
+
+        Returns:
+            Dict with an 'actions' key containing field schemas for POST and other methods.
+        """
+        pass
+
 
 class NetBoxRestClient(NetBoxClientBase):
     """
@@ -347,3 +360,21 @@ class NetBoxRestClient(NetBoxClientBase):
         response = self.session.delete(url, json=data)
         response.raise_for_status()
         return response.status_code == 204
+
+    def options(self, endpoint: str) -> dict[str, Any]:
+        """
+        Retrieve schema metadata for an endpoint via HTTP OPTIONS.
+
+        Args:
+            endpoint: The API endpoint (e.g., 'dcim/sites', 'ipam/prefixes')
+
+        Returns:
+            Dict with an 'actions' key containing field schemas for POST and other methods.
+
+        Raises:
+            httpx.HTTPStatusError: If the request fails
+        """
+        url = self._build_url(endpoint)
+        response = self.session.options(url)
+        response.raise_for_status()
+        return response.json().get("actions", {})
