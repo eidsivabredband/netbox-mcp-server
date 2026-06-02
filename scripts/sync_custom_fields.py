@@ -60,6 +60,60 @@ def _choice_value(val: object) -> object:
     return val
 
 
+def sync_choice_sets(
+    source: NetBoxRestClient,
+    target: NetBoxRestClient,
+    dry_run: bool,
+    referenced_names: set[str],
+) -> dict[str, int]:
+    """Sync choice sets referenced by the fields being processed.
+
+    Returns a dict of choice set name → target ID for all sets that exist (or
+    were just created) on the target, so the field sync can use it directly
+    without re-querying.
+    """
+    if not referenced_names:
+        return {}
+
+    print("\n--- Choice Sets ---")
+
+    src_sets = fetch_all(source, "extras/custom-field-choice-sets")
+    src_by_name = {cs["name"]: cs for cs in src_sets}
+
+    tgt_sets = fetch_all(target, "extras/custom-field-choice-sets")
+    tgt_by_name = {cs["name"]: cs for cs in tgt_sets}
+
+    result: dict[str, int] = {cs["name"]: cs["id"] for cs in tgt_sets}
+
+    for name in sorted(referenced_names):
+        src_cs = src_by_name.get(name)
+        if src_cs is None:
+            print(f"  FAIL  '{name}' — not found in source")
+            continue
+
+        if name in tgt_by_name:
+            print(f"  SKIP  '{name}' — already exists (id={tgt_by_name[name]['id']})")
+            continue
+
+        payload: dict = {"name": name}
+        for key in ("description", "base_choices", "order_alphabetically"):
+            val = src_cs.get(key)
+            if val is not None and val != "":
+                payload[key] = val
+        extra = src_cs.get("extra_choices")
+        if extra:
+            payload["extra_choices"] = extra
+
+        if dry_run:
+            print(f"  DRY   '{name}' — would create")
+        else:
+            created = target.create("extras/custom-field-choice-sets", payload)
+            result[name] = created["id"]
+            print(f"  CREATE '{name}' → id={created['id']}")
+
+    return result
+
+
 def sync(
     source: NetBoxRestClient,
     target: NetBoxRestClient,
@@ -76,6 +130,16 @@ def sync(
     tgt_fields = fetch_all(target, "extras/custom-fields", filter_params)
     tgt_by_name = {f["name"]: f for f in tgt_fields}
     print(f"  Target: {len(tgt_fields)} custom fields")
+
+    # Collect choice set names referenced by select/multiselect fields in the source
+    referenced_choice_sets = {
+        field["choice_set"]["name"]
+        for field in src_fields
+        if _choice_value(field.get("type")) in ("select", "multiselect")
+        and isinstance(field.get("choice_set"), dict)
+        and field["choice_set"].get("name")
+    }
+    tgt_choice_set_ids = sync_choice_sets(source, target, dry_run, referenced_choice_sets)
 
     print("\n--- Custom Fields ---")
     for field in src_fields:
@@ -125,7 +189,7 @@ def sync(
             resolved_rot = rot
             payload["related_object_type"] = rot
 
-        # choice_set — resolve by name on the target
+        # choice_set — look up from the pre-synced map
         resolved_cs_id = None
         if field_type in ("select", "multiselect"):
             cs = field.get("choice_set")
@@ -133,12 +197,10 @@ def sync(
             if not cs_name:
                 print(f"  FAIL  {name} — select/multiselect field has no resolvable choice_set")
                 continue
-            resp = target.get("extras/custom-field-choice-sets", params={"name": cs_name, "limit": 1})
-            tgt_cs = resp.get("results", [])
-            if not tgt_cs:
-                print(f"  FAIL  {name} — choice_set '{cs_name}' not found in target (create it first)")
+            resolved_cs_id = tgt_choice_set_ids.get(cs_name)
+            if resolved_cs_id is None:
+                print(f"  FAIL  {name} — choice_set '{cs_name}' not available on target (check pre-pass output)")
                 continue
-            resolved_cs_id = tgt_cs[0]["id"]
             payload["choice_set"] = resolved_cs_id
 
         if existing:
