@@ -174,7 +174,7 @@ class NetBoxRestClient(NetBoxClientBase):
     # })
     # print(f"Created site: {new_site.get('name')} (ID: {new_site.get('id')})")
 
-    def __init__(self, url: str, token: str, verify_ssl: bool = True, timeout: float = 30.0):
+    def __init__(self, url: str, token: str, verify_ssl: bool = True, timeout: float = 120.0):
         """
         Initialize the REST API client.
 
@@ -182,7 +182,7 @@ class NetBoxRestClient(NetBoxClientBase):
             url: The base URL of the NetBox instance (e.g., 'https://netbox.example.com')
             token: API token for authentication
             verify_ssl: Whether to verify SSL certificates
-            timeout: Request timeout in seconds (default 30s; write operations can be slow)
+            timeout: Request timeout in seconds (default 120s; write operations can be slow)
         """
         self.base_url = url.rstrip("/")
         self.api_url = f"{self.base_url}/api"
