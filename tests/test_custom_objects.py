@@ -225,7 +225,7 @@ def test_custom_object_type_create_minimal():
         result = netbox_custom_object_type_create("Fiber Splice")
     mock_write.create.assert_called_once_with(
         "plugins/custom-objects/custom-object-types",
-        {"name": "Fiber Splice"},
+        {"name": "Fiber Splice", "slug": "fiber-splice"},
     )
     assert result["slug"] == "fiber-splice"
 
