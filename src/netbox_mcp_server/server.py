@@ -674,7 +674,8 @@ def netbox_custom_object_type_create(
             "Write operations require NETBOX_WRITE_TOKEN to be configured. "
             "Set the NETBOX_WRITE_TOKEN environment variable with a write-enabled API token."
         )
-    data: dict = {"name": name}
+    slug = name.replace("_", "-").replace(" ", "-").lower()
+    data: dict = {"name": name, "slug": slug}
     if description:
         data["description"] = description
     if verbose_name:
