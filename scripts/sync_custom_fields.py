@@ -29,6 +29,7 @@ Notes:
 import argparse
 import importlib.util
 import os
+import time
 
 # Load netbox_client directly to avoid pulling in the full package (__init__ → config → pydantic)
 _client_path = os.path.join(os.path.dirname(__file__), "..", "src", "netbox_mcp_server", "netbox_client.py")
@@ -36,6 +37,26 @@ _spec = importlib.util.spec_from_file_location("netbox_client", _client_path)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 NetBoxRestClient = _mod.NetBoxRestClient
+
+
+def _create_with_retry(
+    client: NetBoxRestClient,
+    endpoint: str,
+    payload: dict,
+    max_retries: int = 3,
+    base_delay: float = 2.0,
+) -> dict:
+    """Create an object, retrying on transient PostgreSQL deadlock errors."""
+    for attempt in range(max_retries):
+        try:
+            return client.create(endpoint, payload)
+        except ValueError as exc:
+            if "deadlock" not in str(exc).lower() or attempt == max_retries - 1:
+                raise
+            delay = base_delay * (2**attempt)
+            print(f"    deadlock detected — retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})")
+            time.sleep(delay)
+    raise RuntimeError("unreachable")  # pragma: no cover
 
 
 def fetch_all(client: NetBoxRestClient, endpoint: str, params: dict | None = None) -> list[dict]:
@@ -107,7 +128,7 @@ def sync_choice_sets(
         if dry_run:
             print(f"  DRY   '{name}' — would create")
         else:
-            created = target.create("extras/custom-field-choice-sets", payload)
+            created = _create_with_retry(target, "extras/custom-field-choice-sets", payload)
             result[name] = created["id"]
             print(f"  CREATE '{name}' → id={created['id']}")
 
@@ -228,7 +249,7 @@ def sync(
             if dry_run:
                 print(f"  DRY   {name} ({field_type}) — would create")
             else:
-                created = target.create("extras/custom-fields", payload)
+                created = _create_with_retry(target, "extras/custom-fields", payload)
                 print(f"  CREATE {name} ({field_type}) → id={created['id']}")
 
 
