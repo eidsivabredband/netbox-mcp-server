@@ -154,12 +154,18 @@ def filter_custom_fields(custom_fields, allowed_names):
     of such references. Scalars AND free-form JSON content (objects/lists that are not object
     references — e.g. junos_input/output_vlan_header_operation, interface_config_context) are kept,
     since their contents are instance-agnostic.
+
+    `allowed_names` is a dict of lowercased-CF-name -> the target's actual CF name. Matching is
+    case-insensitive (two NetBox instances can define the same CF with different name casing, e.g.
+    `serviceinstanceidsalesforce` vs `ServiceInstanceIdSalesforce`) and a kept field is emitted under
+    the TARGET's casing so its PATCH is accepted.
     """
     if not custom_fields:
         return {}
     kept, dropped = {}, []
     for name, value in custom_fields.items():
-        if name not in allowed_names:
+        target_name = allowed_names.get(name.lower())
+        if target_name is None:
             dropped.append(f"{name} (not defined on target)")
             continue
         if is_object_reference(value):
@@ -168,7 +174,7 @@ def filter_custom_fields(custom_fields, allowed_names):
         if isinstance(value, list) and any(is_object_reference(v) for v in value):
             dropped.append(f"{name} (list of object/FK references — not remappable)")
             continue
-        kept[name] = value
+        kept[target_name] = value
     if dropped:
         print(f"    dropped custom fields: {', '.join(dropped)}")
     return kept
@@ -490,8 +496,9 @@ def main():
     interfaces = src.get_all("dcim/interfaces/", device_id=src_device["id"])
     print(f"  found {len(interfaces)} interfaces")
 
-    # Custom fields the target defines — values for anything else are dropped.
-    allowed_cfs = {cf["name"] for cf in dst.get_all("extras/custom-fields/")}
+    # Custom fields the target defines, keyed by lowercased name -> actual name (case-insensitive match;
+    # instances can differ in CF-name casing). Values for anything else are dropped.
+    allowed_cfs = {cf["name"].lower(): cf["name"] for cf in dst.get_all("extras/custom-fields/")}
     print(f"Target defines {len(allowed_cfs)} custom fields.")
 
     print("Ensuring prerequisite objects on target...")
