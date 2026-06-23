@@ -261,9 +261,9 @@ def copy_vlans(src, dst, interfaces, allowed_cfs):
     target even when no interface references the S-VLAN directly. Returns a
     source-vlan-id -> target-vlan-id map for remapping interface assignments.
 
-    Two passes over the VLANs: pass 1 creates/updates each VLAN with its scalar attributes
-    (including qinq_role); pass 2 wires each C-VLAN's qinq_svlan parent FK once all target ids
-    exist (a C-VLAN cannot reference its S-VLAN before the S-VLAN has been created).
+    S-VLANs (and plain VLANs) are created before C-VLANs, with each C-VLAN's qinq_svlan parent FK
+    set inline in its create — NetBox rejects a Q-in-Q customer VLAN that has no service VLAN, so the
+    link cannot be deferred to a second pass.
     """
     # Seed from interface references: untagged, tagged, and the interface's own S-VLAN.
     src_vlan_ids = set()
@@ -294,8 +294,16 @@ def copy_vlans(src, dst, interfaces, allowed_cfs):
 
     id_map = {}
     group_cache = {}
-    # Pass 1 — scalar attributes (including qinq_role); the qinq_svlan parent FK is wired in pass 2.
-    for src_vlan_id in sorted(vlans_by_src_id):
+    # Create S-VLANs (and plain VLANs, qinq_svlan == None) BEFORE C-VLANs, and set the qinq_svlan parent FK
+    # inline in the C-VLAN's create: NetBox rejects a Q-in-Q customer VLAN that has no service VLAN ("A
+    # Q-in-Q customer VLAN must be assigned to a service VLAN"), so the link cannot be deferred to a second
+    # pass. Ordering by (has-parent, src-id) puts every parent ahead of its children (the hierarchy is one
+    # level: an S-VLAN's own qinq_svlan is null), so id_map already holds the parent when the child is built.
+    ordered_ids = sorted(
+        vlans_by_src_id,
+        key=lambda sid: (vlans_by_src_id[sid].get("qinq_svlan") is not None, sid),
+    )
+    for src_vlan_id in ordered_ids:
         vlan = vlans_by_src_id[src_vlan_id]
         # Match on vid AND name: a device can carry several distinct VLANs sharing a vid (e.g. a Q-in-Q
         # inner `…-ae2-cvlan-712-29` and an unrelated `…-et-0/0/17-vlan-29`, both vid 29). Matching by vid
@@ -310,6 +318,15 @@ def copy_vlans(src, dst, interfaces, allowed_cfs):
             "qinq_role": value_of(vlan.get("qinq_role")),
             "custom_fields": filter_custom_fields(vlan.get("custom_fields"), allowed_cfs),
         }
+
+        parent = vlan.get("qinq_svlan")
+        if parent:
+            mapped_parent = id_map.get(parent["id"])
+            if mapped_parent:
+                body["qinq_svlan"] = mapped_parent
+            else:
+                print(f"  vlan {vlan['vid']} '{vlan['name']}': qinq_svlan parent {parent['id']} not copied — "
+                      f"creating without the link (NetBox will reject a cvlan with no service VLAN)")
 
         group = vlan.get("group")
         if group:
@@ -331,18 +348,6 @@ def copy_vlans(src, dst, interfaces, allowed_cfs):
             print(f"  vlan {vlan['vid']} '{vlan['name']}': creating")
             dst_vlan = dst.create("ipam/vlans/", body)
         id_map[src_vlan_id] = dst_vlan["id"]
-
-    # Pass 2 — wire each C-VLAN's qinq_svlan parent FK, now that all S-VLAN ids exist on the target.
-    for src_vlan_id, vlan in sorted(vlans_by_src_id.items()):
-        parent = vlan.get("qinq_svlan")
-        if not parent:
-            continue
-        mapped_parent = id_map.get(parent["id"])
-        if not mapped_parent:
-            print(f"  vlan {vlan['vid']} '{vlan['name']}': qinq_svlan parent {parent['id']} not copied, skipping link")
-            continue
-        print(f"  vlan {vlan['vid']} '{vlan['name']}': wiring qinq_svlan -> {mapped_parent}")
-        dst.update("ipam/vlans/", id_map[src_vlan_id], {"qinq_svlan": mapped_parent})
 
     return id_map
 
