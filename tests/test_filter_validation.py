@@ -12,7 +12,23 @@ def test_direct_field_filters_pass():
 
 def test_lookup_suffixes_pass():
     """Lookup suffixes should pass validation."""
-    validate_filters({"name__ic": "switch", "id__in": [1, 2, 3], "vid__gte": 100})
+    validate_filters({"name__ic": "switch", "name__isw": "sw", "vid__gte": 100})
+
+
+def test_multiple_values_as_list_passes():
+    """A list value ORs the values and needs no lookup suffix."""
+    validate_filters({"id": [1, 2, 3]})
+
+
+def test_in_suffix_rejected():
+    """__in was removed from NetBox in 2.11 and must not reach the API.
+
+    NetBox drops a filter it cannot parse and answers 200 with the unfiltered
+    result, so letting __in through returns every object and looks like a real
+    answer. Rejecting it here is the only place the mistake is visible.
+    """
+    with pytest.raises(ValueError, match="no __in lookup"):
+        validate_filters({"id__in": [1, 2, 3]})
 
 
 def test_special_parameters_ignored():
