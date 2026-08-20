@@ -143,9 +143,12 @@ def validate_filters(filters: dict) -> None:
     - device__site_id (filtering by related object's field)
     - interface__device__site (multiple relationship hops)
 
+    Also rejects unsupported lookup suffixes (including __in, which NetBox removed in 2.11).
+    This matters because NetBox drops a filter it cannot parse and answers 200 with the
+    unfiltered result, so a bad suffix can silently return every object rather than failing.
     Valid patterns:
     - Direct field filters: site_id, name, status
-    - Lookup expressions: name__ic, status__in, id__gt
+    - Lookup expressions: name__ic, status__n, id__gt
 
     Args:
         filters: Dictionary of filter parameters
@@ -170,7 +173,6 @@ def validate_filters(filters: dict) -> None:
         "lte",
         "gt",
         "gte",
-        "in",
     }
 
     for filter_name in filters:
@@ -186,6 +188,14 @@ def validate_filters(filters: dict) -> None:
         # Allow field__suffix pattern (e.g., name__ic, id__gt)
         if len(parts) == 2 and parts[-1] in valid_suffixes:
             continue
+        # Called out separately from the generic error: __in is the most common wrong
+        # guess, and the fix is a different filter shape rather than a two-step query.
+        if len(parts) == 2 and parts[-1] == "in":
+            raise ValueError(
+                f"Invalid filter '{filter_name}': NetBox has no __in lookup "
+                f"(removed in 2.11). Pass a list to match multiple values, "
+                f"e.g. {{'id': [1, 2, 3]}}."
+            )
         # Block multi-hop patterns and invalid suffixes
         if len(parts) >= 2:
             raise ValueError(
@@ -205,11 +215,18 @@ def validate_filters(filters: dict) -> None:
 
                 FILTER RULES:
                 Valid: Direct fields like {'site_id': 1, 'name': 'router', 'status': 'active'}
-                Valid: Lookups like {'name__ic': 'switch', 'id__in': [1,2,3], 'vid__gte': 100}
+                Valid: Lookups like {'name__ic': 'switch', 'vid__gte': 100}
+                Valid: A list ORs values - {'id': [1, 2, 3]} sends ?id=1&id=2&id=3
                 Invalid: Multi-hop like {'device__site_id': 1} - NOT supported
 
-                Lookup suffixes: n, ic, nic, isw, nisw, iew, niew, ie, nie,
-                                 empty, regex, iregex, lt, lte, gt, gte, in
+                String field suffixes: n, ic, nic, isw, nisw, iew, niew, ie, nie,
+                                       empty, regex, iregex
+                Numeric field suffixes: n, lt, lte, gt, gte, empty
+
+                There is NO __in suffix (NetBox removed it in 2.11). Pass a list to
+                match multiple values. NetBox DROPS a filter it cannot parse and
+                answers 200 with the unfiltered result, so an unsupported lookup
+                looks like a legitimate - and much larger - result set.
 
                 Two-step pattern for cross-relationship queries:
                   sites = netbox_get_objects('dcim.site', {'name': 'NYC'})
