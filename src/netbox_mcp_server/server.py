@@ -143,10 +143,9 @@ def validate_filters(filters: dict) -> None:
     - device__site_id (filtering by related object's field)
     - interface__device__site (multiple relationship hops)
 
-    Also rejects __in, which NetBox removed in 2.11. This matters because NetBox
-    drops a filter it cannot parse and answers 200 with the unfiltered result, so
-    an __in filter silently returns every object rather than failing.
-
+    Also rejects unsupported lookup suffixes (including __in, which NetBox removed in 2.11).
+    This matters because NetBox drops a filter it cannot parse and answers 200 with the
+    unfiltered result, so a bad suffix can silently return every object rather than failing.
     Valid patterns:
     - Direct field filters: site_id, name, status
     - Lookup expressions: name__ic, status__n, id__gt
