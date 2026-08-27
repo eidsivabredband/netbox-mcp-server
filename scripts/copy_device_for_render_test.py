@@ -51,6 +51,17 @@ import urllib.parse
 import urllib.request
 
 
+def _require_http_url(url: str) -> str:
+    """Reject a non-HTTP(S) URL before opening it.
+
+    urllib honours schemes like `file:`, so a mistyped --source-url, or a `next` link off
+    the wire, could otherwise read a local path instead of talking to NetBox.
+    """
+    if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+        raise SystemExit(f"refusing to open non-HTTP URL: {url!r}")
+    return url
+
+
 class NetBox:
     """Minimal NetBox REST client over urllib."""
 
@@ -66,13 +77,13 @@ class NetBox:
             # NetBox repeats a query key for list-valued filters; urlencode(doseq) handles that.
             url = f"{url}?{urllib.parse.urlencode(params, doseq=True)}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
+        req = urllib.request.Request(_require_http_url(url), data=data, method=method)  # noqa: S310 - scheme checked by _require_http_url
         req.add_header("Authorization", f"Token {self.token}")
         req.add_header("Accept", "application/json")
         if data is not None:
             req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req) as resp:  # noqa: S310 - scheme checked by _require_http_url
                 raw = resp.read().decode("utf-8")
                 return json.loads(raw) if raw else None
         except urllib.error.HTTPError as exc:
@@ -98,10 +109,10 @@ class NetBox:
             if not nxt:
                 break
             # Follow the absolute `next` URL directly.
-            req = urllib.request.Request(nxt, method="GET")
+            req = urllib.request.Request(_require_http_url(nxt), method="GET")  # noqa: S310 - scheme checked by _require_http_url
             req.add_header("Authorization", f"Token {self.token}")
             req.add_header("Accept", "application/json")
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req) as resp:  # noqa: S310 - scheme checked by _require_http_url
                 page = json.loads(resp.read().decode("utf-8"))
         return results
 
@@ -195,27 +206,31 @@ def copy_prerequisites(dst, src_device, allowed_cfs):
     dtype = src_device["device_type"]
     manufacturer = dtype["manufacturer"]
     mfr = ensure(
-        dst, "dcim/manufacturers/",
+        dst,
+        "dcim/manufacturers/",
         {"slug": manufacturer["slug"]},
         {"name": manufacturer["name"], "slug": manufacturer["slug"]},
         f"manufacturer '{manufacturer['name']}'",
     )
     device_type = ensure(
-        dst, "dcim/device-types/",
+        dst,
+        "dcim/device-types/",
         {"slug": dtype["slug"]},
         {"manufacturer": mfr["id"], "model": dtype["model"], "slug": dtype["slug"]},
         f"device-type '{dtype['model']}'",
     )
     role = src_device["role"]
     role_obj = ensure(
-        dst, "dcim/device-roles/",
+        dst,
+        "dcim/device-roles/",
         {"slug": role["slug"]},
         {"name": role["name"], "slug": role["slug"]},
         f"role '{role['name']}'",
     )
     site = src_device["site"]
     site_obj = ensure(
-        dst, "dcim/sites/",
+        dst,
+        "dcim/sites/",
         {"slug": site["slug"]},
         {"name": site["name"], "slug": site["slug"]},
         f"site '{site['name']}'",
@@ -224,7 +239,8 @@ def copy_prerequisites(dst, src_device, allowed_cfs):
     platform = src_device.get("platform")
     if platform:
         platform_obj = ensure(
-            dst, "dcim/platforms/",
+            dst,
+            "dcim/platforms/",
             {"slug": platform["slug"]},
             {"name": platform["name"], "slug": platform["slug"]},
             f"platform '{platform['name']}'",
@@ -246,7 +262,8 @@ def copy_device(dst, src_device, device_type, role_obj, site_obj, platform_obj, 
         # reproduces what the source device actually sees — without copying the shared ConfigContext objects.
         # Falls back to local_context_data if config_context wasn't returned. NetBox validates this against the
         # config-context-profile schema on save (see scripts/local_context_data.schema.json in net-oss).
-        "local_context_data": src_device.get("config_context") or src_device.get("local_context_data"),
+        "local_context_data": src_device.get("config_context")
+        or src_device.get("local_context_data"),
     }
     if platform_obj:
         body["platform"] = platform_obj["id"]
@@ -331,14 +348,17 @@ def copy_vlans(src, dst, interfaces, allowed_cfs):
             if mapped_parent:
                 body["qinq_svlan"] = mapped_parent
             else:
-                print(f"  vlan {vlan['vid']} '{vlan['name']}': qinq_svlan parent {parent['id']} not copied — "
-                      f"creating without the link (NetBox will reject a cvlan with no service VLAN)")
+                print(
+                    f"  vlan {vlan['vid']} '{vlan['name']}': qinq_svlan parent {parent['id']} not copied — "
+                    f"creating without the link (NetBox will reject a cvlan with no service VLAN)"
+                )
 
         group = vlan.get("group")
         if group:
             if group["slug"] not in group_cache:
                 group_cache[group["slug"]] = ensure(
-                    dst, "ipam/vlan-groups/",
+                    dst,
+                    "ipam/vlan-groups/",
                     {"slug": group["slug"]},
                     {"name": group["name"], "slug": group["slug"]},
                     f"vlan-group '{group['name']}'",
@@ -401,7 +421,11 @@ def copy_interfaces(dst, dst_device, interfaces, vlan_id_map, allowed_cfs):
             mapped = vlan_id_map.get(iface["untagged_vlan"]["id"])
             if mapped:
                 rel["untagged_vlan"] = mapped
-        tagged = [vlan_id_map[tv["id"]] for tv in (iface.get("tagged_vlans") or []) if tv["id"] in vlan_id_map]
+        tagged = [
+            vlan_id_map[tv["id"]]
+            for tv in (iface.get("tagged_vlans") or [])
+            if tv["id"] in vlan_id_map
+        ]
         if tagged:
             rel["tagged_vlans"] = tagged
         if iface.get("qinq_svlan"):
@@ -433,7 +457,9 @@ def copy_ip_addresses(src, dst, src_device, iface_id_map, allowed_cfs):
     for ip in ips:
         # Resolve the source interface this IP is assigned to, then map it to the target interface.
         if ip.get("assigned_object_type") != "dcim.interface":
-            print(f"  ip {ip['address']}: not interface-assigned ({ip.get('assigned_object_type')}), skipping")
+            print(
+                f"  ip {ip['address']}: not interface-assigned ({ip.get('assigned_object_type')}), skipping"
+            )
             continue
         src_iface_id = ip.get("assigned_object_id") or (ip.get("assigned_object") or {}).get("id")
         dst_iface_id = iface_id_map.get(src_iface_id)
@@ -473,13 +499,17 @@ def set_primary_ips(dst, dst_device, src_device, address_to_id):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--device", required=True, help="Exact device name to copy")
     parser.add_argument("--src-url", required=True)
     parser.add_argument("--src-token", required=True)
     parser.add_argument("--dst-url", required=True)
     parser.add_argument("--dst-token", required=True)
-    parser.add_argument("--dry-run", action="store_true", help="Print actions without writing to the target")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Print actions without writing to the target"
+    )
     args = parser.parse_args()
 
     src = NetBox(args.src_url, args.src_token, label="src")
@@ -505,7 +535,9 @@ def main():
     device_type, role_obj, site_obj, platform_obj = copy_prerequisites(dst, src_device, allowed_cfs)
 
     print("Copying device...")
-    dst_device = copy_device(dst, src_device, device_type, role_obj, site_obj, platform_obj, allowed_cfs)
+    dst_device = copy_device(
+        dst, src_device, device_type, role_obj, site_obj, platform_obj, allowed_cfs
+    )
 
     print("Copying VLANs referenced by interfaces...")
     vlan_id_map = copy_vlans(src, dst, interfaces, allowed_cfs)
@@ -519,7 +551,14 @@ def main():
     print("Setting device primary IPs...")
     set_primary_ips(dst, dst_device, src_device, address_to_id)
 
-    print("\nDone." + (" (dry-run — nothing written)" if args.dry_run else f" Device '{args.device}' copied to {args.dst_url}."))
+    print(
+        "\nDone."
+        + (
+            " (dry-run — nothing written)"
+            if args.dry_run
+            else f" Device '{args.device}' copied to {args.dst_url}."
+        )
+    )
 
 
 if __name__ == "__main__":

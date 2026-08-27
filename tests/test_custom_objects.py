@@ -119,8 +119,9 @@ def test_custom_object_get_by_id_embeds_id_in_endpoint():
 
 
 def test_custom_object_create_raises_without_write_token():
-    with patch("netbox_mcp_server.server.netbox_write", None), pytest.raises(
-        ValueError, match="NETBOX_WRITE_TOKEN"
+    with (
+        patch("netbox_mcp_server.server.netbox_write", None),
+        pytest.raises(ValueError, match="NETBOX_WRITE_TOKEN"),
     ):
         netbox_custom_object_create("fiber-splice", {"fiber_count": 48})
 
@@ -153,8 +154,9 @@ def test_custom_object_create_passes_data_unchanged():
 
 
 def test_custom_object_update_raises_without_write_token():
-    with patch("netbox_mcp_server.server.netbox_write", None), pytest.raises(
-        ValueError, match="NETBOX_WRITE_TOKEN"
+    with (
+        patch("netbox_mcp_server.server.netbox_write", None),
+        pytest.raises(ValueError, match="NETBOX_WRITE_TOKEN"),
     ):
         netbox_custom_object_update("fiber-splice", 1, {"fiber_count": 96})
 
@@ -188,8 +190,9 @@ def test_custom_object_update_passes_partial_data():
 
 
 def test_custom_object_delete_raises_without_write_token():
-    with patch("netbox_mcp_server.server.netbox_write", None), pytest.raises(
-        ValueError, match="NETBOX_WRITE_TOKEN"
+    with (
+        patch("netbox_mcp_server.server.netbox_write", None),
+        pytest.raises(ValueError, match="NETBOX_WRITE_TOKEN"),
     ):
         netbox_custom_object_delete("fiber-splice", 1)
 
@@ -212,8 +215,9 @@ def test_custom_object_delete_calls_correct_endpoint():
 
 
 def test_custom_object_type_create_raises_without_write_token():
-    with patch("netbox_mcp_server.server.netbox_write", None), pytest.raises(
-        ValueError, match="NETBOX_WRITE_TOKEN"
+    with (
+        patch("netbox_mcp_server.server.netbox_write", None),
+        pytest.raises(ValueError, match="NETBOX_WRITE_TOKEN"),
     ):
         netbox_custom_object_type_create("Fiber Splice")
 
@@ -271,48 +275,54 @@ def test_custom_object_type_create_omits_empty_optional_fields():
 
 
 def test_field_create_raises_without_write_token():
-    with patch("netbox_mcp_server.server.netbox_write", None), pytest.raises(
-        ValueError, match="NETBOX_WRITE_TOKEN"
+    with (
+        patch("netbox_mcp_server.server.netbox_write", None),
+        pytest.raises(ValueError, match="NETBOX_WRITE_TOKEN"),
     ):
         netbox_custom_object_type_field_create(1, "fiber_count", "Fiber Count", "integer")
 
 
 def test_field_create_invalid_type():
     mock_write = MagicMock()
-    with patch("netbox_mcp_server.server.netbox_write", mock_write), pytest.raises(
-        ValueError, match="Invalid field type"
+    with (
+        patch("netbox_mcp_server.server.netbox_write", mock_write),
+        pytest.raises(ValueError, match="Invalid field type"),
     ):
         netbox_custom_object_type_field_create(1, "x", "X", "invalid_type")
 
 
 def test_field_create_select_requires_choice_set():
     mock_write = MagicMock()
-    with patch("netbox_mcp_server.server.netbox_write", mock_write), pytest.raises(
-        ValueError, match="requires choice_set_id"
+    with (
+        patch("netbox_mcp_server.server.netbox_write", mock_write),
+        pytest.raises(ValueError, match="requires choice_set_id"),
     ):
         netbox_custom_object_type_field_create(1, "status", "Status", "select")
 
 
 def test_field_create_multiselect_requires_choice_set():
     mock_write = MagicMock()
-    with patch("netbox_mcp_server.server.netbox_write", mock_write), pytest.raises(
-        ValueError, match="requires choice_set_id"
+    with (
+        patch("netbox_mcp_server.server.netbox_write", mock_write),
+        pytest.raises(ValueError, match="requires choice_set_id"),
     ):
         netbox_custom_object_type_field_create(1, "tags", "Tags", "multiselect")
 
 
 def test_field_create_object_requires_related_type():
     mock_write = MagicMock()
-    with patch("netbox_mcp_server.server.netbox_write", mock_write), pytest.raises(
-        ValueError, match="requires related_object_type"
+    with (
+        patch("netbox_mcp_server.server.netbox_write", mock_write),
+        pytest.raises(ValueError, match="requires related_object_type"),
     ):
         netbox_custom_object_type_field_create(1, "device", "Device", "object")
 
 
 def test_field_create_multiobject_requires_related_type():
     mock_write = MagicMock()
-    with patch("netbox_mcp_server.server.netbox_write", mock_write), pytest.raises(
-        ValueError, match="requires related_object_type"
+    with (
+        patch("netbox_mcp_server.server.netbox_write", mock_write),
+        pytest.raises(ValueError, match="requires related_object_type"),
     ):
         netbox_custom_object_type_field_create(1, "devices", "Devices", "multiobject")
 
@@ -333,9 +343,7 @@ def test_field_create_select_with_choice_set():
     mock_write = MagicMock()
     mock_write.create.return_value = {"id": 1}
     with patch("netbox_mcp_server.server.netbox_write", mock_write):
-        netbox_custom_object_type_field_create(
-            1, "status", "Status", "select", choice_set_id=5
-        )
+        netbox_custom_object_type_field_create(1, "status", "Status", "select", choice_set_id=5)
     sent_data = mock_write.create.call_args.args[1]
     assert sent_data["choice_set"] == 5
 
@@ -345,8 +353,10 @@ def test_field_create_object_with_related_type():
     mock_write.create.return_value = {"id": 1}
     mock_read = MagicMock()
     mock_read.get.return_value = {"results": [{"id": 7}]}
-    with patch("netbox_mcp_server.server.netbox_write", mock_write), \
-         patch("netbox_mcp_server.server.netbox", mock_read):
+    with (
+        patch("netbox_mcp_server.server.netbox_write", mock_write),
+        patch("netbox_mcp_server.server.netbox", mock_read),
+    ):
         netbox_custom_object_type_field_create(
             1, "site", "Site", "object", related_object_type="dcim.site"
         )
