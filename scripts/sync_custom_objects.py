@@ -350,6 +350,7 @@ class ReferenceResolver:
         self.plan = plan
         self.src_types_by_id: dict[int, dict] = {}
         self._object_cache: dict[tuple[str, int], int] = {}
+        self._source_objects: dict[tuple[str, int], dict] = {}
         # Failed lookups are remembered too: the same missing site would otherwise be
         # re-queried for every instance that references it.
         self._failed_lookups: dict[tuple[str, int], str] = {}
@@ -546,9 +547,17 @@ class ReferenceResolver:
                 f"which is not being synced - add --type {slug} (or use --all-types)"
             )
 
+        endpoint = instance_endpoint(slug)
+        source_id = reference_id(ref)
+        cache_key = (endpoint, source_id)
+        # Successes only, unlike the core path: a reference that misses now can hit later
+        # in the same run, once the referenced type's row has been created.
+        if cache_key in self._object_cache:
+            return self._object_cache[cache_key]
+
         # Always fetch in full: a brief custom object reference does not carry the
         # arbitrary fields the match key is built from.
-        source_instance = self.read_source_object(instance_endpoint(slug), reference_id(ref))
+        source_instance = self.read_source_object(endpoint, source_id)
         wanted = self.instance_key(entry, source_instance, depth + 1, translate=True)
         matches = self.target_instances_by_key(slug, entry).get(wanted, [])
         if not matches:
@@ -560,6 +569,7 @@ class ReferenceResolver:
             raise ReferenceResolutionError(
                 f"{len(matches)} target '{slug}' instances share {dict(zip(entry['key_fields'], wanted, strict=False))} - ambiguous"
             )
+        self._object_cache[cache_key] = matches[0]["id"]
         return matches[0]["id"]
 
     def instance_key(self, entry: dict, instance: dict, depth: int, translate: bool) -> tuple:
@@ -577,15 +587,22 @@ class ReferenceResolver:
     def read_source_object(self, endpoint: str, object_id: int) -> dict:
         """Read one source object by id, reporting a failed read as a resolution failure.
 
-        A dangling reference or a transient error would otherwise escape the per-instance
-        handler and abort the whole run.
+        Reads are cached: the same object is asked for once per payload and once per match
+        key, and hundreds of instances commonly point at one device. A dangling reference
+        or a transient error would otherwise escape the per-instance handler and abort the
+        whole run.
         """
+        cache_key = (endpoint, object_id)
+        if cache_key in self._source_objects:
+            return self._source_objects[cache_key]
         try:
-            return self.source.get(endpoint, id=object_id)
+            source_object = self.source.get(endpoint, id=object_id)
         except Exception as exc:  # broad on purpose: any read failure is this reference's
             raise ReferenceResolutionError(
                 f"could not read source {endpoint} id={object_id}: {type(exc).__name__}: {exc}"
             ) from exc
+        self._source_objects[cache_key] = source_object
+        return source_object
 
     def register_created(self, slug: str, instance: dict, key: tuple) -> None:
         """Add a freshly created target instance to the caches so later references see it."""
@@ -950,13 +967,24 @@ def sync(
 
 
 def parse_filters(raw: list[str]) -> dict:
-    """Parse repeated --filter key=value arguments into a query dict."""
-    filters = {}
+    """Parse repeated --filter key=value arguments into a query dict.
+
+    A key given more than once keeps every value: NetBox ORs a repeated query
+    parameter, so `--filter device_id=1 --filter device_id=2` must send both.
+    """
+    filters: dict[str, object] = {}
     for item in raw:
         if "=" not in item:
             raise ValueError(f"--filter must be key=value, got '{item}'")
-        key, value = item.split("=", 1)
-        filters[key.strip()] = value.strip()
+        raw_key, raw_value = item.split("=", 1)
+        key, value = raw_key.strip(), raw_value.strip()
+        existing = filters.get(key)
+        if existing is None:
+            filters[key] = value
+        elif isinstance(existing, list):
+            existing.append(value)
+        else:
+            filters[key] = [existing, value]
     return filters
 
 
