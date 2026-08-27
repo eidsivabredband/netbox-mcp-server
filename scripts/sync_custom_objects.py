@@ -27,11 +27,14 @@ All connection arguments can also be supplied via environment variables:
 Matching
     Instances have no slug, so the match key is derived per type, in this order:
       1. --match-field (repeatable, forms a composite key; needs a single --type)
-      2. all fields flagged unique=true on the type
+      2. one field flagged unique=true (each is independently unique, so ANDing
+         several would miss the target row whenever any one of them drifted)
       3. the field flagged primary=true, plus every object/multiobject field
          (the FKs are what scope an otherwise-repeated primary value, e.g. the
          same NTP address on two devices)
-    The chosen key is printed per type - check it before a non-dry run.
+    The chosen key is printed per type - check it before a non-dry run. A key
+    field the target type does not define is refused: it could never be written,
+    so the key would never match and every run would create the row again.
 
 Foreign keys
     An object/multiobject value cannot be copied verbatim: the id belongs to the
@@ -39,7 +42,13 @@ Foreign keys
     key (slug, address, prefix, vid, name, ...), scoped by its own parent
     reference (device, site, vrf, ...) where the source payload exposes one.
     A reference that resolves to zero or several target objects is reported and
-    the whole instance is SKIPPED - never written with a guessed id.
+    the whole instance is SKIPPED - never written with a guessed id. Source
+    references are always read in full rather than trusted as brief objects: a
+    brief serializer carries the natural key but not the scoping reference, and
+    matching on an unscoped key is how the wrong target object gets picked.
+
+    A write that NetBox rejects fails only its own instance; the run continues so
+    one bad row cannot hide the remaining types.
 
     References to other custom object types are resolved through that type's own
     match key, so those types must be synced too; --all-types orders them
@@ -47,8 +56,11 @@ Foreign keys
 
 Pruning
     --prune deletes target instances whose match key is absent from the source.
-    It is skipped for any type where a source instance failed to resolve: that
-    instance contributed no key, so its target counterpart would look orphaned.
+    It runs as a second pass in reverse dependency order, so a referenced row
+    outlives the rows pointing at it. It is skipped for any type where a source
+    instance failed: that instance contributed no key, so its target counterpart
+    would look orphaned. It cannot be combined with --filter, which narrows the
+    source only and would make every target row outside the filter a delete.
 
 Not translated
     - Polymorphic object fields (related_object_types): reported and skipped.
@@ -104,14 +116,23 @@ class ReferenceResolutionError(Exception):
     """A source foreign key could not be mapped to exactly one target object."""
 
 
-def fetch_all(client: NetBoxRestClient, endpoint: str, params: dict | None = None) -> list[dict]:
-    """Fetch every page of a list endpoint."""
+def fetch_all(
+    client: NetBoxRestClient,
+    endpoint: str,
+    params: dict | None = None,
+    fallback_endpoint: str | None = None,
+) -> list[dict]:
+    """Fetch every page of a list endpoint, optionally falling back to an older endpoint name."""
     results: list[dict] = []
     offset = 0
     limit = 200
     base_params = params or {}
+    fallback = {"fallback_endpoint": fallback_endpoint} if fallback_endpoint else {}
     while True:
-        resp = client.get(endpoint, params={"limit": limit, "offset": offset, **base_params})
+        # Pagination last: a caller-supplied limit/offset would break the paging loop.
+        resp = client.get(
+            endpoint, params={**base_params, "limit": limit, "offset": offset}, **fallback
+        )
         page = resp.get("results", [])
         results.extend(page)
         if len(results) >= resp.get("count", 0) or not page:
@@ -168,6 +189,45 @@ def object_type_of(ref) -> tuple[int | None, str, str]:
     return None, "", ""
 
 
+def needs_content_type_hydration(field: dict) -> bool:
+    """True when an object field names its related object type by id alone."""
+    if field_type(field) not in OBJECT_FIELD_TYPES:
+        return False
+    ref = field.get("related_object_type")
+    if ref is None:
+        return False
+    if isinstance(ref, dict):
+        return not ref.get("app_label") or not ref.get("model")
+    return True
+
+
+def hydrate_related_object_types(source: NetBoxRestClient, fields: list[dict]) -> None:
+    """Expand id-only related_object_type references into {id, app_label, model}, in place.
+
+    Some plugin versions serialize an object field's related object type as a bare
+    content-type id; everything downstream needs the app_label and model.
+    """
+    pending = [f for f in fields if needs_content_type_hydration(f)]
+    if not pending:
+        return
+    object_types = {
+        ot["id"]: ot
+        for ot in fetch_all(source, "core/object-types", fallback_endpoint="extras/content-types")
+    }
+    for field in pending:
+        _id, _, _ = object_type_of(field["related_object_type"])
+        object_type = object_types.get(_id)
+        if object_type is None:
+            # Left as-is on purpose: translate() then reports the unresolvable reference
+            # per instance instead of this pass failing the whole type.
+            continue
+        field["related_object_type"] = {
+            "id": object_type["id"],
+            "app_label": object_type["app_label"],
+            "model": object_type["model"],
+        }
+
+
 def instance_endpoint(slug: str) -> str:
     """The REST endpoint serving instances of one custom object type."""
     return f"plugins/custom-objects/{slug}"
@@ -181,6 +241,17 @@ def custom_object_type_id_from_model(model: str) -> int | None:
         return int(model[5:-5])
     except ValueError:
         return None
+
+
+def reference_id(ref) -> int:
+    """Read the id out of a reference the API gave as either a brief object or a bare id."""
+    if isinstance(ref, dict):
+        if "id" not in ref:
+            raise ReferenceResolutionError(f"reference {ref!r} has no id")
+        return ref["id"]
+    if isinstance(ref, int):
+        return ref
+    raise ReferenceResolutionError(f"unexpected reference value {ref!r}")
 
 
 def normalize_value(value):
@@ -200,10 +271,15 @@ def values_equal(left, right) -> bool:
         return True
     if isinstance(left, bool) or isinstance(right, bool):
         return bool(left) == bool(right)
-    try:
-        return float(left) == float(right)
-    except (TypeError, ValueError):
-        return str(left) == str(right)
+    # Numeric coercion only when a side really is a number, so a decimal field sent as
+    # 1.5 matches a stored "1.500". Two strings are compared as strings: coercing them
+    # would call "0.10" and "0.1" equal and hide genuine drift on a text field.
+    if isinstance(left, (int, float)) or isinstance(right, (int, float)):
+        try:
+            return float(left) == float(right)
+        except (TypeError, ValueError):
+            return False
+    return str(left) == str(right)
 
 
 class ReferenceResolver:
@@ -231,10 +307,6 @@ class ReferenceResolver:
         if slug not in self._target_instances:
             self._target_instances[slug] = fetch_all(self.target, instance_endpoint(slug))
         return self._target_instances[slug]
-
-    def invalidate(self, slug: str) -> None:
-        """Drop the cached target instances of a type after writing to it."""
-        self._target_instances.pop(slug, None)
 
     def target_tag_id(self, slug: str) -> int:
         """Resolve a tag slug to its target id."""
@@ -285,12 +357,16 @@ class ReferenceResolver:
 
     def resolve_core_reference(self, endpoint: str, ref, depth: int) -> int:
         """Resolve a reference to a core NetBox object by natural key."""
-        source_object = self.hydrate(self.source, endpoint, ref)
-        source_id = source_object["id"]
+        source_id = reference_id(ref)
         cache_key = (endpoint, source_id)
         if cache_key in self._object_cache:
             return self._object_cache[cache_key]
 
+        # Always read the full object rather than trusting a brief reference: a brief
+        # serializer carries the natural key but not the scoping references (a brief IP
+        # address has no vrf), and matching on an unscoped key is how the wrong target
+        # object gets picked. One GET per distinct reference, then cached.
+        source_object = self.read_source_object(endpoint, source_id)
         filters = self.natural_key_filters(source_object, endpoint, depth)
         matches = fetch_all(self.target, endpoint, params=filters)
         described = ", ".join(f"{k}={v}" for k, v in filters.items())
@@ -357,7 +433,7 @@ class ReferenceResolver:
 
         # Always fetch in full: a brief custom object reference does not carry the
         # arbitrary fields the match key is built from.
-        source_instance = self.hydrate(self.source, instance_endpoint(slug), ref, force_fetch=True)
+        source_instance = self.read_source_object(instance_endpoint(slug), reference_id(ref))
         wanted = self.instance_key(entry, source_instance, depth + 1, translate=True)
         matches = [
             candidate
@@ -387,36 +463,64 @@ class ReferenceResolver:
             key.append(str(normalize_value(value)))
         return tuple(key)
 
-    def hydrate(
-        self, client: NetBoxRestClient, endpoint: str, ref, force_fetch: bool = False
-    ) -> dict:
-        """Return a reference as a full object, fetching it when the API gave only an id."""
-        if isinstance(ref, dict):
-            if "id" not in ref:
-                raise ReferenceResolutionError(f"reference {ref!r} has no id")
-            # A brief serializer already carries the natural key; only fetch when it does not.
-            has_natural_key = any(ref.get(name) not in (None, "") for name in NATURAL_KEY_FIELDS)
-            if has_natural_key and not force_fetch:
-                return ref
-            ref = ref["id"]
-        if not isinstance(ref, int):
-            raise ReferenceResolutionError(f"unexpected reference value {ref!r}")
-        return client.get(endpoint, id=ref)
+    def read_source_object(self, endpoint: str, object_id: int) -> dict:
+        """Read one source object by id, reporting a failed read as a resolution failure.
+
+        A dangling reference or a transient error would otherwise escape the per-instance
+        handler and abort the whole run.
+        """
+        try:
+            return self.source.get(endpoint, id=object_id)
+        except Exception as exc:  # broad on purpose: any read failure is this reference's
+            raise ReferenceResolutionError(
+                f"could not read source {endpoint} id={object_id}: {type(exc).__name__}: {exc}"
+            ) from exc
+
+    def register_created(self, slug: str, instance: dict) -> None:
+        """Add a freshly created target instance to the cache so later references see it."""
+        if slug in self._target_instances:
+            self._target_instances[slug].append(instance)
 
 
-def choose_key_fields(fields: list[dict], override: list[str]) -> list[str]:
+def choose_key_fields(
+    fields: list[dict], override: list[str], target_field_names: set
+) -> list[str]:
     """Pick the field names identifying an instance, per the precedence in the module docstring."""
     by_name = {f["name"]: f for f in fields}
     if override:
         missing = [name for name in override if name not in by_name]
         if missing:
             raise ValueError(f"--match-field {', '.join(missing)} not defined on this type")
-        return list(override)
+        key = list(override)
+    else:
+        key = derive_key_fields(fields)
 
-    unique = [f["name"] for f in fields if f.get("unique")]
+    # A key field the target type lacks is never written, so its target value stays empty
+    # and the key can never match - every run would create the instance again.
+    absent = [name for name in key if name not in target_field_names]
+    if absent:
+        raise ValueError(f"match key field(s) {', '.join(absent)} not defined on the target type")
+    return key
+
+
+def derive_key_fields(fields: list[dict]) -> list[str]:
+    """Derive a match key from the field flags when no --match-field was given."""
+    # Each unique field is independently unique, so one of them is the whole key:
+    # ANDing several would miss the target row whenever any one of them has drifted,
+    # and the create that follows would then hit the uniqueness constraint.
+    unique = sorted(f["name"] for f in fields if f.get("unique"))
     if unique:
-        return sorted(unique)
+        primary_unique = [f["name"] for f in fields if f.get("unique") and f.get("primary")]
+        chosen = primary_unique[0] if primary_unique else unique[0]
+        if len(unique) > 1:
+            print(
+                f"  note: unique fields {', '.join(unique)} - matching on '{chosen}' alone; "
+                f"pass --match-field to choose"
+            )
+        return [chosen]
 
+    # No unique field: the primary field plus every reference, because the references
+    # are what scope an otherwise-repeated primary value (one address per device).
     primary = [f["name"] for f in fields if f.get("primary")]
     references = [f["name"] for f in fields if field_type(f) in OBJECT_FIELD_TYPES]
     key = sorted(set(primary) | set(references))
@@ -487,6 +591,8 @@ def build_plan(
     print(f"  Source: {len(src_types)} types, {len(src_fields)} fields")
     print(f"  Target: {len(tgt_types)} types, {len(tgt_fields)} fields")
 
+    hydrate_related_object_types(source, src_fields)
+
     src_types_by_slug = {t["slug"]: t for t in src_types}
     tgt_types_by_slug = {t["slug"]: t for t in tgt_types}
 
@@ -518,8 +624,9 @@ def build_plan(
         if not fields:
             print(f"  FAIL  '{slug}' - source type has no fields")
             continue
+        target_field_names = {f["name"] for f in tgt_fields_by_type.get(tgt_type["id"], [])}
         try:
-            key_fields = choose_key_fields(fields, match_fields)
+            key_fields = choose_key_fields(fields, match_fields, target_field_names)
         except ValueError as exc:
             print(f"  FAIL  '{slug}' - {exc}")
             continue
@@ -529,7 +636,7 @@ def build_plan(
             "tgt_type": tgt_type,
             "fields": fields,
             "fields_by_name": {f["name"]: f for f in fields},
-            "target_field_names": {f["name"] for f in tgt_fields_by_type.get(tgt_type["id"], [])},
+            "target_field_names": target_field_names,
             "key_fields": key_fields,
         }
 
@@ -581,10 +688,9 @@ def sync_type(
     slug: str,
     entry: dict,
     source_filters: dict,
-    prune: bool,
     dry_run: bool,
-) -> None:
-    """Upsert every source instance of one custom object type into the target."""
+) -> tuple[set, int]:
+    """Upsert every source instance of one type, returning the keys seen and the failure count."""
     endpoint = instance_endpoint(slug)
     print(f"\n--- {slug} (match on {', '.join(entry['key_fields'])}) ---")
 
@@ -601,7 +707,6 @@ def sync_type(
 
     seen_keys: set[tuple] = set()
     failures = 0
-    dirty = False
     for instance in source_instances:
         label = instance.get("display") or f"id={instance['id']}"
         try:
@@ -612,7 +717,14 @@ def sync_type(
             failures += 1
             continue
 
+        if key in seen_keys:
+            # Two source instances reducing to one key would create two target rows on
+            # this run and be unmatchable ("share key") on the next. Report instead.
+            print(f"  FAIL  {label} - key {key} already used by an earlier source instance")
+            failures += 1
+            continue
         seen_keys.add(key)
+
         existing = target_by_key.get(key, [])
         if len(existing) > 1:
             print(
@@ -621,47 +733,70 @@ def sync_type(
             failures += 1
             continue
 
-        if not existing:
-            if dry_run:
-                print(f"  DRY   {label} - would create")
-            else:
+        # A write can fail for reasons this script cannot foresee (validation, a
+        # uniqueness constraint). Count it as a failure for this instance and carry on:
+        # aborting the run would leave the remaining instances and types untouched.
+        try:
+            if not existing:
+                if dry_run:
+                    print(f"  DRY   {label} - would create")
+                    continue
                 created = _create_with_retry(target, endpoint, payload)
                 print(f"  CREATE {label} -> id={created['id']}")
-                dirty = True
-            continue
+                target_by_key.setdefault(key, []).append(created)
+                resolver.register_created(slug, created)
+                continue
 
-        target_instance = existing[0]
-        drifted = changed_fields(payload, target_instance)
-        if not drifted:
-            print(f"  SKIP  {label} - up to date (id={target_instance['id']})")
-            continue
+            target_instance = existing[0]
+            drifted = changed_fields(payload, target_instance)
+            if not drifted:
+                print(f"  SKIP  {label} - up to date (id={target_instance['id']})")
+                continue
 
-        if dry_run:
-            print(f"  DRY   {label} - would update ({', '.join(drifted)})")
-        else:
+            if dry_run:
+                print(f"  DRY   {label} - would update ({', '.join(drifted)})")
+                continue
             updated = target.update(endpoint, target_instance["id"], payload)
             print(f"  UPDATE {label} -> id={updated['id']} ({', '.join(drifted)})")
-            dirty = True
+            target_instance.update(updated)
+        except Exception as exc:  # broad on purpose: one bad row must not end the run
+            print(f"  FAIL  {label} - write failed: {type(exc).__name__}: {exc}")
+            failures += 1
 
-    if prune and failures:
-        # A source instance that failed to resolve contributed no key, so its target
-        # counterpart looks absent from the source. Pruning now would delete valid rows.
-        print(f"  PRUNE SKIPPED - {failures} source instance(s) failed; fix them and re-run")
-    elif prune:
-        for key, instances in sorted(target_by_key.items()):
-            if key in seen_keys:
-                continue
-            for instance in instances:
-                label = instance.get("display") or f"id={instance['id']}"
-                if dry_run:
-                    print(f"  DRY   {label} - would delete (not in source)")
-                else:
-                    target.delete(endpoint, instance["id"])
-                    print(f"  DELETE {label} (id={instance['id']}, not in source)")
-                    dirty = True
+    return seen_keys, failures
 
-    if dirty:
-        resolver.invalidate(slug)
+
+def prune_type(
+    target: NetBoxRestClient,
+    resolver: ReferenceResolver,
+    slug: str,
+    entry: dict,
+    seen_keys: set,
+    failures: int,
+    dry_run: bool,
+) -> None:
+    """Delete target instances of one type whose match key is absent from the source."""
+    endpoint = instance_endpoint(slug)
+    if failures:
+        # A source instance that failed contributed no key, so its target counterpart
+        # looks absent from the source. Pruning now would delete valid rows.
+        print(f"\n--- {slug} PRUNE SKIPPED - {failures} source instance(s) failed; fix and re-run")
+        return
+
+    print(f"\n--- {slug} prune ---")
+    for instance in list(resolver.target_instances(slug)):
+        key = resolver.instance_key(entry, instance, depth=0, translate=False)
+        if key in seen_keys:
+            continue
+        label = instance.get("display") or f"id={instance['id']}"
+        if dry_run:
+            print(f"  DRY   {label} - would delete (not in source)")
+            continue
+        try:
+            target.delete(endpoint, instance["id"])
+            print(f"  DELETE {label} (id={instance['id']}, not in source)")
+        except Exception as exc:  # broad on purpose: a protected row must not end the run
+            print(f"  FAIL  {label} - delete failed: {type(exc).__name__}: {exc}")
 
 
 def sync(
@@ -686,8 +821,17 @@ def sync(
     # reference can be named in the diagnostic instead of just failing.
     resolver.src_types_by_id = src_types_by_id
 
+    outcomes: dict[str, tuple[set, int]] = {}
     for slug, entry in plan.items():
-        sync_type(source, target, resolver, slug, entry, source_filters, prune, dry_run)
+        outcomes[slug] = sync_type(source, target, resolver, slug, entry, source_filters, dry_run)
+
+    if not prune:
+        return
+    # Prune in reverse dependency order, after every type has been upserted: a referenced
+    # row must outlive the rows pointing at it, or NetBox refuses the delete.
+    for slug in reversed(list(plan)):
+        seen_keys, failures = outcomes[slug]
+        prune_type(target, resolver, slug, plan[slug], seen_keys, failures, dry_run)
 
 
 def parse_filters(raw: list[str]) -> dict:
@@ -762,6 +906,10 @@ def main() -> None:
         parser.error("--type and --all-types are mutually exclusive")
     if args.match_field and len(args.type) != 1:
         parser.error("--match-field names fields of one type; pass exactly one --type with it")
+    if args.prune and args.filter:
+        # The filter narrows the source only. Every target row outside it would look
+        # absent from the source and be deleted.
+        parser.error("--prune cannot be combined with --filter")
 
     try:
         source_filters = parse_filters(args.filter)
