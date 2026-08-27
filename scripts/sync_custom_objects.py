@@ -33,8 +33,10 @@ Matching
          (the FKs are what scope an otherwise-repeated primary value, e.g. the
          same NTP address on two devices)
     The chosen key is printed per type - check it before a non-dry run. A key
-    field the target type does not define is refused: it could never be written,
-    so the key would never match and every run would create the row again.
+    field the target type does not define, or defines with a different field
+    type, is refused: it could never be written, or the two sides of the key
+    would be built from different shapes, so the key would never match and every
+    run would create the row again.
 
 Foreign keys
     An object/multiobject value cannot be copied verbatim: the id belongs to the
@@ -615,7 +617,7 @@ class ReferenceResolver:
 
 
 def choose_key_fields(
-    fields: list[dict], override: list[str], target_field_names: set
+    fields: list[dict], override: list[str], target_fields_by_name: dict
 ) -> list[str]:
     """Pick the field names identifying an instance, per the precedence in the module docstring."""
     by_name = {f["name"]: f for f in fields}
@@ -632,9 +634,22 @@ def choose_key_fields(
 
     # A key field the target type lacks is never written, so its target value stays empty
     # and the key can never match - every run would create the instance again.
-    absent = [name for name in key if name not in target_field_names]
+    absent = [name for name in key if name not in target_fields_by_name]
     if absent:
         raise ValueError(f"match key field(s) {', '.join(absent)} not defined on the target type")
+
+    # Same name, different type is the subtler version of the same trap: the source side
+    # of the key is built from one shape and the target side from another (an object field
+    # reduces to an id, a text field to a string), so they can never compare equal.
+    mismatched = [
+        f"{name} ({field_type(by_name[name])} vs {field_type(target_fields_by_name[name])})"
+        for name in key
+        if field_type(by_name[name]) != field_type(target_fields_by_name[name])
+    ]
+    if mismatched:
+        raise ValueError(
+            f"match key field(s) differ in type from the target: {', '.join(mismatched)}"
+        )
     return key
 
 
@@ -670,7 +685,7 @@ def build_payload(resolver: ReferenceResolver, entry: dict, instance: dict) -> d
     for name, field in entry["fields_by_name"].items():
         if name not in instance:
             continue
-        if name not in entry["target_field_names"]:
+        if name not in entry["target_fields_by_name"]:
             print(f"      note: field '{name}' not defined on the target type - omitted")
             continue
         payload[name] = resolver.translate(field, instance[name])
@@ -759,9 +774,9 @@ def build_plan(
         if not fields:
             print(f"  FAIL  '{slug}' - source type has no fields")
             continue
-        target_field_names = {f["name"] for f in tgt_fields_by_type.get(tgt_type["id"], [])}
+        target_fields_by_name = {f["name"]: f for f in tgt_fields_by_type.get(tgt_type["id"], [])}
         try:
-            key_fields = choose_key_fields(fields, match_fields, target_field_names)
+            key_fields = choose_key_fields(fields, match_fields, target_fields_by_name)
         except ValueError as exc:
             print(f"  FAIL  '{slug}' - {exc}")
             continue
@@ -771,7 +786,7 @@ def build_plan(
             "tgt_type": tgt_type,
             "fields": fields,
             "fields_by_name": {f["name"]: f for f in fields},
-            "target_field_names": target_field_names,
+            "target_fields_by_name": target_fields_by_name,
             "key_fields": key_fields,
         }
 
@@ -1062,6 +1077,12 @@ def main() -> None:
         parser.error(str(exc))
 
     verify_ssl = not args.no_verify_ssl
+    if not verify_ssl:
+        print(
+            "WARNING - TLS certificate verification is DISABLED for both instances. "
+            "This script writes data; a man-in-the-middle could read the API tokens "
+            "and alter what is written.\n"
+        )
     source = NetBoxRestClient(url=args.source_url, token=args.source_token, verify_ssl=verify_ssl)
     target = NetBoxRestClient(url=args.target_url, token=args.target_token, verify_ssl=verify_ssl)
 
