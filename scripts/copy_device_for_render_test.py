@@ -51,6 +51,17 @@ import urllib.parse
 import urllib.request
 
 
+def _require_http_url(url: str) -> str:
+    """Reject a non-HTTP(S) URL before opening it.
+
+    urllib honours schemes like `file:`, so a mistyped --source-url, or a `next` link off
+    the wire, could otherwise read a local path instead of talking to NetBox.
+    """
+    if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+        raise SystemExit(f"refusing to open non-HTTP URL: {url!r}")
+    return url
+
+
 class NetBox:
     """Minimal NetBox REST client over urllib."""
 
@@ -66,13 +77,13 @@ class NetBox:
             # NetBox repeats a query key for list-valued filters; urlencode(doseq) handles that.
             url = f"{url}?{urllib.parse.urlencode(params, doseq=True)}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
+        req = urllib.request.Request(_require_http_url(url), data=data, method=method)  # noqa: S310 - scheme checked by _require_http_url
         req.add_header("Authorization", f"Token {self.token}")
         req.add_header("Accept", "application/json")
         if data is not None:
             req.add_header("Content-Type", "application/json")
         try:
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req) as resp:  # noqa: S310 - scheme checked by _require_http_url
                 raw = resp.read().decode("utf-8")
                 return json.loads(raw) if raw else None
         except urllib.error.HTTPError as exc:
@@ -98,10 +109,10 @@ class NetBox:
             if not nxt:
                 break
             # Follow the absolute `next` URL directly.
-            req = urllib.request.Request(nxt, method="GET")
+            req = urllib.request.Request(_require_http_url(nxt), method="GET")  # noqa: S310 - scheme checked by _require_http_url
             req.add_header("Authorization", f"Token {self.token}")
             req.add_header("Accept", "application/json")
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req) as resp:  # noqa: S310 - scheme checked by _require_http_url
                 page = json.loads(resp.read().decode("utf-8"))
         return results
 

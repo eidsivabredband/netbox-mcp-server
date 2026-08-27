@@ -18,6 +18,7 @@ All arguments can also be supplied via environment variables:
 """
 
 import argparse
+import contextlib
 import importlib.util
 import os
 
@@ -27,6 +28,9 @@ _spec = importlib.util.spec_from_file_location("netbox_client", _client_path)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 NetBoxRestClient = _mod.NetBoxRestClient
+
+# Placeholder target id for a type that a dry run would have created.
+_DRY_ID = 0
 
 
 def fetch_all(client: NetBoxRestClient, endpoint: str) -> list[dict]:
@@ -52,7 +56,6 @@ def sync(
     src_types = fetch_all(source, "plugins/custom-objects/custom-object-types")
     src_fields = fetch_all(source, "plugins/custom-objects/custom-object-type-fields")
     src_types_by_id = {t["id"]: t for t in src_types}
-    src_types_by_slug = {t["slug"]: t for t in src_types}
     print(f"  Source: {len(src_types)} types, {len(src_fields)} fields")
 
     print("Fetching core object types (for FK field resolution)...")
@@ -77,7 +80,6 @@ def sync(
 
     print("Fetching target choice sets (for select field comparison)...")
     tgt_choice_sets = fetch_all(target, "extras/custom-field-choice-sets")
-    tgt_choice_set_by_id = {cs["id"]: cs for cs in tgt_choice_sets}
     print(f"  Target: {len(tgt_choice_sets)} choice sets")
 
     def _resolve_slug(type_ref, by_id_map: dict) -> str:
@@ -98,7 +100,6 @@ def sync(
     # slug → target ID, pre-seeded with already-existing target types.
     # In dry-run mode, would-create types are added with _DRY_ID as a placeholder so that
     # field resolution can proceed and show DRY instead of FAIL.
-    _DRY_ID = 0
     slug_to_target_id = {slug: t["id"] for slug, t in tgt_types_by_slug.items()}
 
     print("\n--- Types ---")
@@ -183,10 +184,8 @@ def sync(
                 # so parse N out of the model name and match by id.
                 src_type_id_from_model = None
                 if model.startswith("table") and model.endswith("model"):
-                    try:
+                    with contextlib.suppress(ValueError):
                         src_type_id_from_model = int(model[5:-5])
-                    except ValueError:
-                        pass
                 src_ref_slug = next(
                     (t["slug"] for t in src_types if t.get("content_type_id") == rot_id
                      or t.get("model") == model or t.get("slug") == model

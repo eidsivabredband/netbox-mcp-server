@@ -75,6 +75,9 @@ unfixable = []
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S105", "S106", "S107"]  # Allow assert and hardcoded passwords in tests
+# The operator scripts are CLIs: stdout IS their interface, so print is correct there.
+# The no-print rule stays in force for the server package, where LOG_LEVEL is the output.
+"scripts/*" = ["T201"]
 
 [tool.ruff.format]
 indent-style = "space"
