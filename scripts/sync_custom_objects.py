@@ -402,12 +402,14 @@ class ReferenceResolver:
         ftype = field_type(field)
         if ftype not in OBJECT_FIELD_TYPES:
             return value
+        # Empty first: an unset reference has nothing to translate, so it copies as-is
+        # even on a polymorphic field whose set values this script cannot map.
+        if value in (None, [], ""):
+            return value
         if field.get("is_polymorphic") or field.get("related_object_types"):
             raise ReferenceResolutionError(
                 f"field '{field['name']}' is polymorphic - not supported"
             )
-        if value in (None, [], ""):
-            return value
         if ftype == "multiobject":
             refs = value if isinstance(value, list) else [value]
             return [self.resolve_reference(field, ref, depth) for ref in refs]
