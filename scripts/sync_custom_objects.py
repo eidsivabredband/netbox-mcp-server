@@ -83,15 +83,20 @@ import argparse
 import importlib.util
 import os
 import time
+from types import ModuleType
+from typing import Any
 
 # Load the client and type map directly to avoid pulling in the full package
 # (__init__ -> config -> pydantic), matching the other scripts in this directory.
 _SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "src", "netbox_mcp_server")
 
 
-def _load_module(name: str):
+def _load_module(name: str) -> ModuleType:
     """Import a single module file from the package source directory."""
-    spec = importlib.util.spec_from_file_location(name, os.path.join(_SRC_DIR, f"{name}.py"))
+    path = os.path.join(_SRC_DIR, f"{name}.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {name} from {path} - is the package source present?")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -147,12 +152,24 @@ def fetch_all(
         resp = client.get(
             endpoint, params={**base_params, "limit": limit, "offset": offset}, **fallback
         )
-        page = resp.get("results", [])
+        total, page = read_page(resp)
         results.extend(page)
-        if len(results) >= resp.get("count", 0) or not page:
+        if len(results) >= total or not page:
             break
         offset += limit
     return results
+
+
+def read_page(resp: Any) -> tuple[int, list[dict]]:
+    """Read one list response as (total matches, this page).
+
+    NetBox paginates list endpoints, but a plugin endpoint answering with a bare list
+    would otherwise crash the paging loop on the missing keys.
+    """
+    if isinstance(resp, list):
+        return len(resp), resp
+    page = resp.get("results", [])
+    return resp.get("count", len(page)), page
 
 
 def _create_with_retry(
@@ -185,7 +202,7 @@ def field_type(field: dict) -> str:
     return raw or ""
 
 
-def type_id_of(ref) -> int | None:
+def type_id_of(ref: dict | int | None) -> int | None:
     """Read the custom_object_type reference off a field definition (id or brief object)."""
     if isinstance(ref, dict):
         return ref.get("id")
@@ -194,7 +211,7 @@ def type_id_of(ref) -> int | None:
     return None
 
 
-def object_type_of(ref) -> tuple[int | None, str, str]:
+def object_type_of(ref: dict | int | None) -> tuple[int | None, str, str]:
     """Read a related_object_type reference as (id, app_label, model)."""
     if isinstance(ref, dict):
         return ref.get("id"), ref.get("app_label", ""), ref.get("model", "")
@@ -264,7 +281,7 @@ def custom_object_type_id_from_model(model: str) -> int | None:
         return None
 
 
-def is_object_reference_value(value) -> bool:
+def is_object_reference_value(value: Any) -> bool:
     """True when a custom field value is an object reference rather than plain data.
 
     A multiselect custom field is a list of strings and copies verbatim; only a nested
@@ -303,7 +320,7 @@ def candidate_filter_sets(natural_key: dict, scopes: dict) -> list:
     return attempts
 
 
-def reference_id(ref) -> int:
+def reference_id(ref: dict | int | None) -> int:
     """Read the id out of a reference the API gave as either a brief object or a bare id."""
     if isinstance(ref, dict):
         if "id" not in ref:
@@ -314,7 +331,7 @@ def reference_id(ref) -> int:
     raise ReferenceResolutionError(f"unexpected reference value {ref!r}")
 
 
-def normalize_value(value):
+def normalize_value(value: Any) -> Any:
     """Reduce an API value to a comparable form: brief objects to their id, lists to a sorted tuple."""
     if isinstance(value, dict):
         return value.get("id")
@@ -323,7 +340,7 @@ def normalize_value(value):
     return value
 
 
-def values_equal(left, right) -> bool:
+def values_equal(left: Any, right: Any) -> bool:
     """Compare two API values, tolerating null/empty and int-vs-string representations."""
     left = normalize_value(left)
     right = normalize_value(right)
@@ -399,7 +416,7 @@ class ReferenceResolver:
             )
         return self._target_tags[slug]
 
-    def translate(self, field: dict, value, depth: int = 0):
+    def translate(self, field: dict, value: Any, depth: int = 0) -> Any:
         """Translate one source field value into a target-ready payload value."""
         ftype = field_type(field)
         if ftype not in OBJECT_FIELD_TYPES:
@@ -417,7 +434,7 @@ class ReferenceResolver:
             return [self.resolve_reference(field, ref, depth) for ref in refs]
         return self.resolve_reference(field, value, depth)
 
-    def resolve_reference(self, field: dict, ref, depth: int) -> int:
+    def resolve_reference(self, field: dict, ref: dict | int | None, depth: int) -> int:
         """Resolve a single source reference to the id of the equivalent target object."""
         if depth > MAX_RESOLUTION_DEPTH:
             raise ReferenceResolutionError(
@@ -438,7 +455,7 @@ class ReferenceResolver:
             )
         return self.resolve_core_reference(endpoint, ref, depth)
 
-    def resolve_core_reference(self, endpoint: str, ref, depth: int) -> int:
+    def resolve_core_reference(self, endpoint: str, ref: dict | int | None, depth: int) -> int:
         """Resolve a reference to a core NetBox object by natural key."""
         source_id = reference_id(ref)
         cache_key = (endpoint, source_id)
@@ -487,11 +504,7 @@ class ReferenceResolver:
         Paging through every match would pull thousands of rows for a relaxed filter just
         to conclude that it is ambiguous.
         """
-        resp = self.target.get(endpoint, params={**filters, "limit": 2})
-        if isinstance(resp, list):
-            return len(resp), resp
-        results = resp.get("results", [])
-        return resp.get("count", len(results)), results
+        return read_page(self.target.get(endpoint, params={**filters, "limit": 2}))
 
     def fail_lookup(self, cache_key: tuple, message: str) -> None:
         """Remember a failed lookup and raise it, so the same miss is not re-queried."""
@@ -547,7 +560,9 @@ class ReferenceResolver:
                 return endpoint
         return None
 
-    def resolve_custom_object_reference(self, field: dict, ref, model: str, depth: int) -> int:
+    def resolve_custom_object_reference(
+        self, field: dict, ref: dict | int | None, model: str, depth: int
+    ) -> int:
         """Resolve a reference to another custom object type through that type's match key."""
         src_type_id = custom_object_type_id_from_model(model)
         src_type = self.src_types_by_id.get(src_type_id) if src_type_id is not None else None
