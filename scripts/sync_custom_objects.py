@@ -222,9 +222,16 @@ def hydrate_related_object_types(source: NetBoxRestClient, fields: list[dict]) -
     pending = [f for f in fields if needs_content_type_hydration(f)]
     if not pending:
         return
+    # Endpoint and pre-4.4 fallback both come from the shared type map, so this stays in
+    # lockstep with the server rather than hardcoding a second copy of the pair.
+    object_type_entry = NETBOX_OBJECT_TYPES["core.objecttype"]
     object_types = {
         ot["id"]: ot
-        for ot in fetch_all(source, "core/object-types", fallback_endpoint="extras/content-types")
+        for ot in fetch_all(
+            source,
+            object_type_entry["endpoint"],
+            fallback_endpoint=object_type_entry.get("fallback_endpoint"),
+        )
     }
     for field in pending:
         _id, _, _ = object_type_of(field["related_object_type"])
@@ -348,6 +355,7 @@ class ReferenceResolver:
         self._failed_lookups: dict[tuple[str, int], str] = {}
         self._noted: set[str] = set()
         self._target_instances: dict[str, list[dict]] = {}
+        self._target_index: dict[str, dict[tuple, list[dict]]] = {}
         self._target_tags: dict[str, int] | None = None
 
     def endpoint_for(self, app_label: str, model: str) -> str | None:
@@ -362,6 +370,21 @@ class ReferenceResolver:
         if slug not in self._target_instances:
             self._target_instances[slug] = fetch_all(self.target, instance_endpoint(slug))
         return self._target_instances[slug]
+
+    def target_instances_by_key(self, slug: str, entry: dict) -> dict:
+        """Target instances of one type indexed by match key, built once per type.
+
+        Resolving each reference by scanning the list would recompute every candidate's
+        key on every lookup - O(references x rows) on a large table.
+        """
+        if slug not in self._target_index:
+            index: dict[tuple, list[dict]] = {}
+            for instance in self.target_instances(slug):
+                index.setdefault(self.instance_key(entry, instance, 0, translate=False), []).append(
+                    instance
+                )
+            self._target_index[slug] = index
+        return self._target_index[slug]
 
     def target_tag_id(self, slug: str) -> int:
         """Resolve a tag slug to its target id."""
@@ -527,11 +550,7 @@ class ReferenceResolver:
         # arbitrary fields the match key is built from.
         source_instance = self.read_source_object(instance_endpoint(slug), reference_id(ref))
         wanted = self.instance_key(entry, source_instance, depth + 1, translate=True)
-        matches = [
-            candidate
-            for candidate in self.target_instances(slug)
-            if self.instance_key(entry, candidate, depth + 1, translate=False) == wanted
-        ]
+        matches = self.target_instances_by_key(slug, entry).get(wanted, [])
         if not matches:
             raise ReferenceResolutionError(
                 f"no target '{slug}' instance with {dict(zip(entry['key_fields'], wanted, strict=False))} "
@@ -568,10 +587,12 @@ class ReferenceResolver:
                 f"could not read source {endpoint} id={object_id}: {type(exc).__name__}: {exc}"
             ) from exc
 
-    def register_created(self, slug: str, instance: dict) -> None:
-        """Add a freshly created target instance to the cache so later references see it."""
+    def register_created(self, slug: str, instance: dict, key: tuple) -> None:
+        """Add a freshly created target instance to the caches so later references see it."""
         if slug in self._target_instances:
             self._target_instances[slug].append(instance)
+        if slug in self._target_index:
+            self._target_index[slug].setdefault(key, []).append(instance)
 
 
 def choose_key_fields(
@@ -583,6 +604,9 @@ def choose_key_fields(
         missing = [name for name in override if name not in by_name]
         if missing:
             raise ValueError(f"--match-field {', '.join(missing)} not defined on this type")
+        repeated = sorted({name for name in override if override.count(name) > 1})
+        if repeated:
+            raise ValueError(f"--match-field {', '.join(repeated)} given more than once")
         key = list(override)
     else:
         key = derive_key_fields(fields)
@@ -792,10 +816,9 @@ def sync_type(
         f"  source: {len(source_instances)} instance(s), target: {len(target_instances)} instance(s)"
     )
 
-    target_by_key: dict[tuple, list[dict]] = {}
-    for instance in target_instances:
-        key = resolver.instance_key(entry, instance, depth=0, translate=False)
-        target_by_key.setdefault(key, []).append(instance)
+    # One index per type, shared with reference resolution: register_created keeps it
+    # current, so nothing here rebuilds or appends to it.
+    target_by_key = resolver.target_instances_by_key(slug, entry)
 
     seen_keys: set[tuple] = set()
     failures = 0
@@ -835,8 +858,7 @@ def sync_type(
                     continue
                 created = _create_with_retry(target, endpoint, payload)
                 print(f"  CREATE {label} -> id={created['id']}")
-                target_by_key.setdefault(key, []).append(created)
-                resolver.register_created(slug, created)
+                resolver.register_created(slug, created, key)
                 continue
 
             target_instance = existing[0]
@@ -876,19 +898,20 @@ def prune_type(
         return
 
     print(f"\n--- {slug} prune ---")
-    for instance in list(resolver.target_instances(slug)):
-        key = resolver.instance_key(entry, instance, depth=0, translate=False)
+    target_by_key = resolver.target_instances_by_key(slug, entry)
+    for key, instances in sorted(target_by_key.items()):
         if key in seen_keys:
             continue
-        label = instance.get("display") or f"id={instance['id']}"
-        if dry_run:
-            print(f"  DRY   {label} - would delete (not in source)")
-            continue
-        try:
-            target.delete(endpoint, instance["id"])
-            print(f"  DELETE {label} (id={instance['id']}, not in source)")
-        except Exception as exc:  # broad on purpose: a protected row must not end the run
-            print(f"  FAIL  {label} - delete failed: {type(exc).__name__}: {exc}")
+        for instance in instances:
+            label = instance.get("display") or f"id={instance['id']}"
+            if dry_run:
+                print(f"  DRY   {label} - would delete (not in source)")
+                continue
+            try:
+                target.delete(endpoint, instance["id"])
+                print(f"  DELETE {label} (id={instance['id']}, not in source)")
+            except Exception as exc:  # broad on purpose: a protected row must not end the run
+                print(f"  FAIL  {label} - delete failed: {type(exc).__name__}: {exc}")
 
 
 def sync(
