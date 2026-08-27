@@ -460,11 +460,11 @@ class ReferenceResolver:
         # a unique hit is still a unique hit, and an ambiguous one always fails.
         attempts = candidate_filter_sets(natural_key, scopes)
         for filters, dropped in attempts:
-            matches = fetch_all(self.target, endpoint, params=filters)
+            count, matches = self.count_target_matches(endpoint, filters)
             described = describe_filters(filters)
-            if len(matches) > 1:
+            if count > 1 or len(matches) > 1:
                 self.fail_lookup(
-                    cache_key, f"{len(matches)} target {endpoint} match {described} - ambiguous"
+                    cache_key, f"{count} target {endpoint} match {described} - ambiguous"
                 )
             if not matches:
                 continue
@@ -479,6 +479,19 @@ class ReferenceResolver:
         self.fail_lookup(
             cache_key, f"no target {endpoint} matching {describe_filters(attempts[-1][0])}"
         )
+
+    def count_target_matches(self, endpoint: str, filters: dict) -> tuple[int, list[dict]]:
+        """Return (total matches, the first two) for a target filter.
+
+        Deciding none/one/ambiguous needs only the first two rows and the reported total.
+        Paging through every match would pull thousands of rows for a relaxed filter just
+        to conclude that it is ambiguous.
+        """
+        resp = self.target.get(endpoint, params={**filters, "limit": 2})
+        if isinstance(resp, list):
+            return len(resp), resp
+        results = resp.get("results", [])
+        return resp.get("count", len(results)), results
 
     def fail_lookup(self, cache_key: tuple, message: str) -> None:
         """Remember a failed lookup and raise it, so the same miss is not re-queried."""
