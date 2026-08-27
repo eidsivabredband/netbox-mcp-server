@@ -41,11 +41,16 @@ Foreign keys
     source instance. Each reference is re-resolved against the target by natural
     key (slug, address, prefix, vid, name, ...), scoped by its own parent
     reference (device, site, vrf, ...) where the source payload exposes one.
-    A reference that resolves to zero or several target objects is reported and
-    the whole instance is SKIPPED - never written with a guessed id. Source
-    references are always read in full rather than trusted as brief objects: a
-    brief serializer carries the natural key but not the scoping reference, and
-    matching on an unscoped key is how the wrong target object gets picked.
+    Scoping is an AND, so a lookup that finds nothing is retried with the weak
+    scopes dropped (site, rack, tenant legitimately differ between instances)
+    and then with the natural key alone. A step is accepted only when it matches
+    EXACTLY one target object, and the dropped scopes are named in a note; a step
+    matching several fails as ambiguous. So a reference that resolves to zero or
+    several target objects is reported and the whole instance is SKIPPED - never
+    written with a guessed id. Source references are always read in full rather
+    than trusted as brief objects: a brief serializer carries the natural key but
+    not the scoping reference, and matching on an unscoped key is how the wrong
+    target object gets picked.
 
     A write that NetBox rejects fails only its own instance; the run continues so
     one bad row cannot hide the remaining types.
@@ -64,8 +69,10 @@ Pruning
 
 Not translated
     - Polymorphic object fields (related_object_types): reported and skipped.
-    - FK-valued custom fields on the instance: reported and skipped (scalar
-      custom field values are copied).
+    - Object-reference custom fields on the instance: reported and skipped. A
+      multiselect custom field is a list of plain strings and does copy; only a
+      nested object, or a list of them, carries ids that the target would not
+      share.
     Tags are copied by slug and must already exist in the target - see
     scripts/sync_tags.py.
 """
@@ -106,6 +113,11 @@ NATURAL_KEY_FIELDS = ("slug", "address", "prefix", "vid", "asn", "rd", "name", "
 # Parent references that scope an otherwise ambiguous natural key (an interface
 # name is unique per device, not per fleet). Resolved recursively.
 SCOPE_REF_FIELDS = ("device", "virtual_machine", "site", "rack", "vrf", "tenant", "module")
+
+# The scopes worth keeping when the fully scoped lookup finds nothing: a name reused
+# across parents is only disambiguated by its owner. The rest - site, rack, tenant -
+# legitimately differ between two instances and are dropped before failing.
+STRONG_SCOPE_FIELDS = ("device", "virtual_machine", "vrf", "module")
 
 OBJECT_FIELD_TYPES = ("object", "multiobject")
 
@@ -243,6 +255,45 @@ def custom_object_type_id_from_model(model: str) -> int | None:
         return None
 
 
+def is_object_reference_value(value) -> bool:
+    """True when a custom field value is an object reference rather than plain data.
+
+    A multiselect custom field is a list of strings and copies verbatim; only a nested
+    object, or a list of them, carries source ids that would be wrong in the target.
+    """
+    if isinstance(value, dict):
+        return True
+    if isinstance(value, list):
+        return any(isinstance(item, dict) for item in value)
+    return False
+
+
+def describe_filters(filters: dict) -> str:
+    """Render a filter dict for a log line."""
+    return ", ".join(f"{key}={value}" for key, value in filters.items())
+
+
+def candidate_filter_sets(natural_key: dict, scopes: dict) -> list:
+    """Target filter sets to try in order, from fully scoped down to the natural key alone.
+
+    Each entry is (filters, dropped scope names). Only the scopes that genuinely
+    disambiguate a reused name are kept in the middle step; site, tenant and rack are
+    the ones that legitimately differ between two NetBox instances.
+    """
+    attempts: list[tuple[dict, list[str]]] = []
+
+    def add(selected: dict) -> None:
+        filters = {**natural_key, **selected}
+        if any(filters == existing for existing, _ in attempts):
+            return
+        attempts.append((filters, sorted(set(scopes) - set(selected))))
+
+    add(scopes)
+    add({k: v for k, v in scopes.items() if k.removesuffix("_id") in STRONG_SCOPE_FIELDS})
+    add({})
+    return attempts
+
+
 def reference_id(ref) -> int:
     """Read the id out of a reference the API gave as either a brief object or a bare id."""
     if isinstance(ref, dict):
@@ -292,6 +343,10 @@ class ReferenceResolver:
         self.plan = plan
         self.src_types_by_id: dict[int, dict] = {}
         self._object_cache: dict[tuple[str, int], int] = {}
+        # Failed lookups are remembered too: the same missing site would otherwise be
+        # re-queried for every instance that references it.
+        self._failed_lookups: dict[tuple[str, int], str] = {}
+        self._noted: set[str] = set()
         self._target_instances: dict[str, list[dict]] = {}
         self._target_tags: dict[str, int] | None = None
 
@@ -361,39 +416,62 @@ class ReferenceResolver:
         cache_key = (endpoint, source_id)
         if cache_key in self._object_cache:
             return self._object_cache[cache_key]
+        if cache_key in self._failed_lookups:
+            raise ReferenceResolutionError(self._failed_lookups[cache_key])
 
         # Always read the full object rather than trusting a brief reference: a brief
         # serializer carries the natural key but not the scoping references (a brief IP
         # address has no vrf), and matching on an unscoped key is how the wrong target
         # object gets picked. One GET per distinct reference, then cached.
         source_object = self.read_source_object(endpoint, source_id)
-        filters = self.natural_key_filters(source_object, endpoint, depth)
-        matches = fetch_all(self.target, endpoint, params=filters)
-        described = ", ".join(f"{k}={v}" for k, v in filters.items())
-        if not matches:
-            raise ReferenceResolutionError(f"no target {endpoint} matching {described}")
-        if len(matches) > 1:
-            raise ReferenceResolutionError(
-                f"{len(matches)} target {endpoint} match {described} - ambiguous"
-            )
+        natural_key, scopes = self.natural_key_filters(source_object, endpoint, depth)
 
-        self._object_cache[cache_key] = matches[0]["id"]
-        return matches[0]["id"]
+        # Scoping is an AND, so an object whose site or tenant differs between the two
+        # instances would never match on the full filter even when its own name is
+        # unmistakable. Relax in steps and accept the first step with EXACTLY one match:
+        # a unique hit is still a unique hit, and an ambiguous one always fails.
+        attempts = candidate_filter_sets(natural_key, scopes)
+        for filters, dropped in attempts:
+            matches = fetch_all(self.target, endpoint, params=filters)
+            described = describe_filters(filters)
+            if len(matches) > 1:
+                self.fail_lookup(
+                    cache_key, f"{len(matches)} target {endpoint} match {described} - ambiguous"
+                )
+            if not matches:
+                continue
+            if dropped:
+                print(
+                    f"      note: target {endpoint} matched on {described} after ignoring "
+                    f"{', '.join(dropped)} (differs between the instances)"
+                )
+            self._object_cache[cache_key] = matches[0]["id"]
+            return matches[0]["id"]
 
-    def natural_key_filters(self, source_object: dict, endpoint: str, depth: int) -> dict:
-        """Build the target filter identifying one source object without using its id."""
-        filters = {}
+        self.fail_lookup(
+            cache_key, f"no target {endpoint} matching {describe_filters(attempts[-1][0])}"
+        )
+
+    def fail_lookup(self, cache_key: tuple, message: str) -> None:
+        """Remember a failed lookup and raise it, so the same miss is not re-queried."""
+        self._failed_lookups[cache_key] = message
+        raise ReferenceResolutionError(message)
+
+    def natural_key_filters(self, source_object: dict, endpoint: str, depth: int) -> tuple:
+        """Build the target filter identifying one source object, as (natural key, scopes)."""
+        natural_key = {}
         for candidate in NATURAL_KEY_FIELDS:
             value = source_object.get(candidate)
             if value not in (None, ""):
-                filters[candidate] = value
+                natural_key[candidate] = value
                 break
-        if not filters:
+        if not natural_key:
             raise ReferenceResolutionError(
                 f"source {endpoint} id={source_object['id']} exposes no natural key "
                 f"({', '.join(NATURAL_KEY_FIELDS)})"
             )
 
+        scopes = {}
         for scope in SCOPE_REF_FIELDS:
             scope_ref = source_object.get(scope)
             if not isinstance(scope_ref, dict) or "id" not in scope_ref:
@@ -401,10 +479,24 @@ class ReferenceResolver:
             scope_endpoint = self.scope_endpoint(scope)
             if scope_endpoint is None:
                 continue
-            filters[f"{scope}_id"] = self.resolve_core_reference(
-                scope_endpoint, scope_ref, depth + 1
-            )
-        return filters
+            try:
+                scopes[f"{scope}_id"] = self.resolve_core_reference(
+                    scope_endpoint, scope_ref, depth + 1
+                )
+            except ReferenceResolutionError as exc:
+                # A scope with no counterpart in the target cannot constrain the lookup,
+                # so drop it instead of failing the reference that merely carries it.
+                # Safe: every attempt below still demands exactly one match, so a missing
+                # filter can only turn into an ambiguity failure, never a wrong pick.
+                self.note_once(f"scope:{scope_endpoint}:{scope_ref['id']}", f"{scope} - {exc}")
+        return natural_key, scopes
+
+    def note_once(self, key: str, message: str) -> None:
+        """Print a note the first time it comes up, so a per-instance loop stays readable."""
+        if key in self._noted:
+            return
+        self._noted.add(key)
+        print(f"      note: ignoring scope {message}")
 
     def scope_endpoint(self, scope: str) -> str | None:
         """Map a scoping field name (device, site, vrf, ...) onto its REST endpoint."""
@@ -550,7 +642,7 @@ def build_payload(resolver: ReferenceResolver, entry: dict, instance: dict) -> d
     custom_fields = instance.get("custom_fields") or {}
     copyable = {}
     for name, value in custom_fields.items():
-        if isinstance(value, (dict, list)):
+        if is_object_reference_value(value):
             print(f"      note: custom field '{name}' holds an object reference - omitted")
             continue
         copyable[name] = value
