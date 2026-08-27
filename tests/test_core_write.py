@@ -66,8 +66,9 @@ def test_create_object_invalid_type():
 
 
 def test_create_object_no_write_token():
-    with patch("netbox_mcp_server.server.netbox_write", None), pytest.raises(
-        ValueError, match="NETBOX_WRITE_TOKEN"
+    with (
+        patch("netbox_mcp_server.server.netbox_write", None),
+        pytest.raises(ValueError, match="NETBOX_WRITE_TOKEN"),
     ):
         netbox_create_object("dcim.site", {"name": "Test", "slug": "test"})
 
@@ -104,8 +105,9 @@ def test_update_object_invalid_type():
 
 
 def test_update_object_no_write_token():
-    with patch("netbox_mcp_server.server.netbox_write", None), pytest.raises(
-        ValueError, match="NETBOX_WRITE_TOKEN"
+    with (
+        patch("netbox_mcp_server.server.netbox_write", None),
+        pytest.raises(ValueError, match="NETBOX_WRITE_TOKEN"),
     ):
         netbox_update_object("dcim.device", 5, {"status": "planned"})
 
@@ -140,8 +142,9 @@ def test_delete_object_invalid_type():
 
 
 def test_delete_object_no_write_token():
-    with patch("netbox_mcp_server.server.netbox_write", None), pytest.raises(
-        ValueError, match="NETBOX_WRITE_TOKEN"
+    with (
+        patch("netbox_mcp_server.server.netbox_write", None),
+        pytest.raises(ValueError, match="NETBOX_WRITE_TOKEN"),
     ):
         netbox_delete_object("dcim.device", 5)
 

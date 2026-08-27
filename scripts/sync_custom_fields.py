@@ -32,7 +32,9 @@ import os
 import time
 
 # Load netbox_client directly to avoid pulling in the full package (__init__ → config → pydantic)
-_client_path = os.path.join(os.path.dirname(__file__), "..", "src", "netbox_mcp_server", "netbox_client.py")
+_client_path = os.path.join(
+    os.path.dirname(__file__), "..", "src", "netbox_mcp_server", "netbox_client.py"
+)
 _spec = importlib.util.spec_from_file_location("netbox_client", _client_path)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
@@ -54,7 +56,9 @@ def _create_with_retry(
             if "deadlock" not in str(exc).lower() or attempt == max_retries - 1:
                 raise
             delay = base_delay * (2**attempt)
-            print(f"    deadlock detected — retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})")
+            print(
+                f"    deadlock detected — retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})"
+            )
             time.sleep(delay)
     raise RuntimeError("unreachable")  # pragma: no cover
 
@@ -220,7 +224,9 @@ def sync(
                 continue
             resolved_cs_id = tgt_choice_set_ids.get(cs_name)
             if resolved_cs_id is None:
-                print(f"  FAIL  {name} — choice_set '{cs_name}' not available on target (check pre-pass output)")
+                print(
+                    f"  FAIL  {name} — choice_set '{cs_name}' not available on target (check pre-pass output)"
+                )
                 continue
             payload["choice_set"] = resolved_cs_id
 
@@ -232,7 +238,9 @@ def sync(
                     needs_update = True
             if resolved_cs_id is not None:
                 existing_cs = existing.get("choice_set")
-                existing_cs_id = existing_cs.get("id") if isinstance(existing_cs, dict) else existing_cs
+                existing_cs_id = (
+                    existing_cs.get("id") if isinstance(existing_cs, dict) else existing_cs
+                )
                 if existing_cs_id != resolved_cs_id:
                     needs_update = True
 

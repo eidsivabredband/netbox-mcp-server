@@ -30,14 +30,18 @@ from typing import Any
 import httpx
 
 # Load netbox_client directly to avoid pulling in the full package (__init__ → config → pydantic)
-_client_path = os.path.join(os.path.dirname(__file__), "..", "src", "netbox_mcp_server", "netbox_client.py")
+_client_path = os.path.join(
+    os.path.dirname(__file__), "..", "src", "netbox_mcp_server", "netbox_client.py"
+)
 _spec = importlib.util.spec_from_file_location("netbox_client", _client_path)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
 NetBoxRestClient = _mod.NetBoxRestClient
 
 
-def fetch_all(client: NetBoxRestClient, endpoint: str, params: dict | None = None, limit: int = 1000) -> list[dict]:
+def fetch_all(
+    client: NetBoxRestClient, endpoint: str, params: dict | None = None, limit: int = 1000
+) -> list[dict]:
     """Page through a list endpoint and return every result."""
     results: list[dict] = []
     offset = 0
@@ -84,7 +88,9 @@ def _bulk_update_with_retry(
             if "deadlock" not in str(exc).lower() or attempt == max_retries - 1:
                 raise
             delay = base_delay * (2**attempt)
-            print(f"    deadlock detected — retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})")
+            print(
+                f"    deadlock detected — retrying in {delay:.0f}s (attempt {attempt + 1}/{max_retries})"
+            )
             time.sleep(delay)
 
 
@@ -113,7 +119,9 @@ def clear_cf(
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code != 400:
             raise
-        print(f"  server-side cf filter unsupported for this field — scanning all {endpoint} (slower)")
+        print(
+            f"  server-side cf filter unsupported for this field — scanning all {endpoint} (slower)"
+        )
         candidates = fetch_all(client, endpoint)
     print(f"  {len(candidates)} fetched")
 
@@ -130,7 +138,9 @@ def clear_cf(
 
     if not apply:
         sample = ", ".join(str(i) for i in to_clear[:10])
-        print(f"\nDRY RUN — pass --apply to clear. First ids: {sample}{' ...' if len(to_clear) > 10 else ''}")
+        print(
+            f"\nDRY RUN — pass --apply to clear. First ids: {sample}{' ...' if len(to_clear) > 10 else ''}"
+        )
         return
 
     cleared = 0
@@ -149,17 +159,32 @@ def main() -> None:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--url", default=os.getenv("NETBOX_URL"), required=not os.getenv("NETBOX_URL"))
-    parser.add_argument("--token", default=os.getenv("NETBOX_TOKEN"), required=not os.getenv("NETBOX_TOKEN"))
-    parser.add_argument("--field", required=True, help="Custom field 'name' to clear (not its label)")
+    parser.add_argument(
+        "--url", default=os.getenv("NETBOX_URL"), required=not os.getenv("NETBOX_URL")
+    )
+    parser.add_argument(
+        "--token", default=os.getenv("NETBOX_TOKEN"), required=not os.getenv("NETBOX_TOKEN")
+    )
+    parser.add_argument(
+        "--field", required=True, help="Custom field 'name' to clear (not its label)"
+    )
     parser.add_argument(
         "--endpoint",
         default="dcim/interfaces",
         help="List endpoint to target (default dcim/interfaces; use virtualization/interfaces for VM interfaces)",
     )
-    parser.add_argument("--batch-size", type=int, default=100, help="Interfaces per bulk-PATCH request (default 100)")
-    parser.add_argument("--apply", action="store_true", help="Actually write changes (default is a dry-run preview)")
-    parser.add_argument("--no-verify-ssl", action="store_true", help="Disable SSL certificate verification")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=100,
+        help="Interfaces per bulk-PATCH request (default 100)",
+    )
+    parser.add_argument(
+        "--apply", action="store_true", help="Actually write changes (default is a dry-run preview)"
+    )
+    parser.add_argument(
+        "--no-verify-ssl", action="store_true", help="Disable SSL certificate verification"
+    )
     args = parser.parse_args()
 
     client = NetBoxRestClient(url=args.url, token=args.token, verify_ssl=not args.no_verify_ssl)
