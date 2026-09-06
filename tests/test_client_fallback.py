@@ -26,8 +26,9 @@ def client():
 def error_response(status_code: int, detail: str) -> MagicMock:
     """A response the client must raise on, carrying a body it is expected to report.
 
-    The error path reads is_success, status_code, text and request, so a bare MagicMock
-    would look successful (every attribute is truthy) and the test would pass vacuously.
+    The error path reads is_success, status_code, reason_phrase, text and request, so a
+    bare MagicMock would look successful (every attribute is truthy) and the test would
+    pass vacuously.
     """
     response = MagicMock()
     response.is_success = False
@@ -249,6 +250,21 @@ def test_error_message_stays_on_one_line(client):
     assert "\n" not in message
     assert "\r" not in message
     assert "<html> <body> Bad Gateway </body> </html>" in message
+
+
+def test_whitespace_heavy_body_still_fills_the_cap(client):
+    """Collapsing runs on a bounded slice must still leave enough text to reach the cap."""
+    primary_response = error_response(502, "x")
+    primary_response.text = "x " * (_MAX_ERROR_BODY * 2)
+
+    with patch.object(client.session, "get") as mock_get:
+        mock_get.return_value = primary_response
+
+        with pytest.raises(httpx.HTTPStatusError) as excinfo:
+            client.get("core/object-types")
+
+    detail = str(excinfo.value).split(": ", 1)[1]
+    assert len(detail) == _MAX_ERROR_BODY
 
 
 def test_redirect_raises_as_stock_httpx_does(client):

@@ -14,6 +14,10 @@ import httpx
 # JSON detail, but a misconfigured proxy can answer with a whole HTML page.
 _MAX_ERROR_BODY = 2000
 _TRUNCATION_MARKER = " ... (truncated)"
+# Whitespace is collapsed over a bounded slice rather than the whole body: tokenising a
+# multi-megabyte error page to produce 2000 characters is work worth skipping. The slack
+# leaves room for whitespace to vanish and the result still to fill the cap.
+_ERROR_BODY_SCAN = _MAX_ERROR_BODY * 4
 
 
 def _error_detail(response: httpx.Response) -> str:
@@ -22,7 +26,7 @@ def _error_detail(response: httpx.Response) -> str:
     Whitespace is collapsed because this text lands in a log line: an error page would
     otherwise turn a single failure into dozens of lines and break line-oriented parsing.
     """
-    detail = " ".join(response.text.split())
+    detail = " ".join(response.text[:_ERROR_BODY_SCAN].split())
     if len(detail) > _MAX_ERROR_BODY:
         detail = detail[: _MAX_ERROR_BODY - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
     return detail
@@ -290,9 +294,10 @@ class NetBoxRestClient(NetBoxClientBase):
             The created object as a dict
 
         Raises:
-            ValueError: If the request fails, carrying the status code and the response
-                body, truncated past _MAX_ERROR_BODY characters. Unlike the other methods
-                here, which raise httpx.HTTPStatusError.
+            ValueError: If NetBox returns a non-success response, carrying the status
+                code and the response body truncated past _MAX_ERROR_BODY characters.
+                Unlike the other methods here, which raise httpx.HTTPStatusError. A
+                transport failure raises httpx.RequestError, as it does everywhere else.
         """
         url = self._build_url(endpoint)
         response = self.session.post(url, json=data)
