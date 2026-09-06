@@ -285,7 +285,8 @@ class NetBoxRestClient(NetBoxClientBase):
             The created object as a dict
 
         Raises:
-            httpx.HTTPStatusError: If the request fails
+            ValueError: If the request fails, carrying the status code and response body.
+                Unlike the other methods here, which raise httpx.HTTPStatusError.
         """
         url = self._build_url(endpoint)
         response = self.session.post(url, json=data)
