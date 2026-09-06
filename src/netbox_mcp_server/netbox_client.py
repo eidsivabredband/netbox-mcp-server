@@ -17,8 +17,12 @@ _TRUNCATION_MARKER = " ... (truncated)"
 
 
 def _error_detail(response: httpx.Response) -> str:
-    """The response body, trimmed and capped so an HTML error page cannot flood a message."""
-    detail = response.text.strip()
+    """The response body as one line, capped so an HTML error page cannot flood a message.
+
+    Whitespace is collapsed because this text lands in a log line: an error page would
+    otherwise turn a single failure into dozens of lines and break line-oriented parsing.
+    """
+    detail = " ".join(response.text.split())
     if len(detail) > _MAX_ERROR_BODY:
         detail = detail[: _MAX_ERROR_BODY - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
     return detail
@@ -32,8 +36,9 @@ def _raise_for_status(response: httpx.Response) -> None:
     """
     if response.is_success:
         return
+    status = f"{response.status_code} {response.reason_phrase}".strip()
+    message = f"{response.request.method} {response.request.url} failed {status}"
     detail = _error_detail(response)
-    message = f"{response.request.method} {response.request.url} failed {response.status_code}"
     if detail:
         message = f"{message}: {detail}"
     raise httpx.HTTPStatusError(message, request=response.request, response=response)

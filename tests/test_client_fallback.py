@@ -32,6 +32,7 @@ def error_response(status_code: int, detail: str) -> MagicMock:
     response = MagicMock()
     response.is_success = False
     response.status_code = status_code
+    response.reason_phrase = httpx.codes.get_reason_phrase(status_code)
     response.text = '{"detail": "' + detail + '"}'
     response.request = httpx.Request("GET", "https://netbox.example.com/api/core/object-types/")
     return response
@@ -220,6 +221,34 @@ def test_error_message_caps_an_oversized_body(client):
     detail = str(excinfo.value).split(": ", 1)[1]
     assert len(detail) == _MAX_ERROR_BODY
     assert detail.endswith("(truncated)")
+
+
+def test_error_message_names_the_status(client):
+    """The reason phrase is what makes a bare status code readable in a log."""
+    primary_response = error_response(403, "Nope")
+
+    with patch.object(client.session, "get") as mock_get:
+        mock_get.return_value = primary_response
+
+        with pytest.raises(httpx.HTTPStatusError, match="failed 403 Forbidden"):
+            client.get("core/object-types")
+
+
+def test_error_message_stays_on_one_line(client):
+    """An HTML error page must not turn one failure into a multi-line log entry."""
+    primary_response = error_response(502, "x")
+    primary_response.text = "<html>\n  <body>\n    Bad Gateway\r\n  </body>\n</html>"
+
+    with patch.object(client.session, "get") as mock_get:
+        mock_get.return_value = primary_response
+
+        with pytest.raises(httpx.HTTPStatusError) as excinfo:
+            client.get("core/object-types")
+
+    message = str(excinfo.value)
+    assert "\n" not in message
+    assert "\r" not in message
+    assert "<html> <body> Bad Gateway </body> </html>" in message
 
 
 def test_redirect_raises_as_stock_httpx_does(client):
