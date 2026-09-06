@@ -10,6 +10,34 @@ from typing import Any
 
 import httpx
 
+# An error body is a diagnostic, not a payload: NetBox answers a bad request with a short
+# JSON detail, but a misconfigured proxy can answer with a whole HTML page.
+_MAX_ERROR_BODY = 2000
+_TRUNCATION_MARKER = " ... (truncated)"
+
+
+def _error_detail(response: httpx.Response) -> str:
+    """The response body, trimmed and capped so an HTML error page cannot flood a message."""
+    detail = response.text.strip()
+    if len(detail) > _MAX_ERROR_BODY:
+        detail = detail[: _MAX_ERROR_BODY - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+    return detail
+
+
+def _raise_for_status(response: httpx.Response) -> None:
+    """Raise on an error response, carrying the server's own explanation in the message.
+
+    httpx.Response.raise_for_status reports the status line alone, which discards the body
+    NetBox uses to say why - the permission detail behind a 403, the field errors behind a 400.
+    """
+    if response.is_success:
+        return
+    detail = _error_detail(response)
+    message = f"{response.request.method} {response.request.url} failed {response.status_code}"
+    if detail:
+        message = f"{message}: {detail}"
+    raise httpx.HTTPStatusError(message, request=response.request, response=response)
+
 
 class NetBoxClientBase(abc.ABC):
     """
@@ -241,7 +269,7 @@ class NetBoxRestClient(NetBoxClientBase):
             fallback_url = self._build_url(fallback_endpoint, id)
             response = self.session.get(fallback_url, params=params)
 
-        response.raise_for_status()
+        _raise_for_status(response)
 
         return response.json()
 
@@ -262,7 +290,7 @@ class NetBoxRestClient(NetBoxClientBase):
         url = self._build_url(endpoint)
         response = self.session.post(url, json=data)
         if not response.is_success:
-            raise ValueError(f"POST {url} failed {response.status_code}: {response.text}")
+            raise ValueError(f"POST {url} failed {response.status_code}: {_error_detail(response)}")
         return response.json()
 
     def update(self, endpoint: str, id: int, data: dict[str, Any]) -> dict[str, Any]:
@@ -282,7 +310,7 @@ class NetBoxRestClient(NetBoxClientBase):
         """
         url = self._build_url(endpoint, id)
         response = self.session.patch(url, json=data)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     def delete(self, endpoint: str, id: int) -> bool:
@@ -301,7 +329,7 @@ class NetBoxRestClient(NetBoxClientBase):
         """
         url = self._build_url(endpoint, id)
         response = self.session.delete(url)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.status_code == 204
 
     def bulk_create(self, endpoint: str, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -320,7 +348,7 @@ class NetBoxRestClient(NetBoxClientBase):
         """
         url = f"{self._build_url(endpoint)}bulk/"
         response = self.session.post(url, json=data)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     def bulk_update(self, endpoint: str, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -339,7 +367,7 @@ class NetBoxRestClient(NetBoxClientBase):
         """
         url = f"{self._build_url(endpoint)}bulk/"
         response = self.session.patch(url, json=data)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     def bulk_delete(self, endpoint: str, ids: list[int]) -> bool:
@@ -359,7 +387,7 @@ class NetBoxRestClient(NetBoxClientBase):
         url = f"{self._build_url(endpoint)}bulk/"
         data = [{"id": id} for id in ids]
         response = self.session.delete(url, json=data)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.status_code == 204
 
     def options(self, endpoint: str) -> dict[str, Any]:
@@ -377,5 +405,5 @@ class NetBoxRestClient(NetBoxClientBase):
         """
         url = self._build_url(endpoint)
         response = self.session.options(url)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json().get("actions", {})
