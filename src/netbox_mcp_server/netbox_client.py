@@ -268,7 +268,8 @@ class NetBoxRestClient(NetBoxClientBase):
                 - results: Array of objects for this page
 
         Raises:
-            httpx.HTTPStatusError: If the request fails
+            httpx.HTTPStatusError: If NetBox returns a non-success response. A transport
+                failure raises httpx.RequestError.
         """
         url = self._build_url(endpoint, id)
         response = self.session.get(url, params=params)
@@ -318,7 +319,8 @@ class NetBoxRestClient(NetBoxClientBase):
             The updated object as a dict
 
         Raises:
-            httpx.HTTPStatusError: If the request fails
+            httpx.HTTPStatusError: If NetBox returns a non-success response. A transport
+                failure raises httpx.RequestError.
         """
         url = self._build_url(endpoint, id)
         response = self.session.patch(url, json=data)
@@ -337,7 +339,8 @@ class NetBoxRestClient(NetBoxClientBase):
             True if deletion was successful, False otherwise
 
         Raises:
-            httpx.HTTPStatusError: If the request fails
+            httpx.HTTPStatusError: If NetBox returns a non-success response. A transport
+                failure raises httpx.RequestError.
         """
         url = self._build_url(endpoint, id)
         response = self.session.delete(url)
@@ -356,7 +359,8 @@ class NetBoxRestClient(NetBoxClientBase):
             List of created objects as dicts
 
         Raises:
-            httpx.HTTPStatusError: If the request fails
+            httpx.HTTPStatusError: If NetBox returns a non-success response. A transport
+                failure raises httpx.RequestError.
         """
         url = f"{self._build_url(endpoint)}bulk/"
         response = self.session.post(url, json=data)
@@ -375,7 +379,8 @@ class NetBoxRestClient(NetBoxClientBase):
             List of updated objects as dicts
 
         Raises:
-            httpx.HTTPStatusError: If the request fails
+            httpx.HTTPStatusError: If NetBox returns a non-success response. A transport
+                failure raises httpx.RequestError.
         """
         url = f"{self._build_url(endpoint)}bulk/"
         response = self.session.patch(url, json=data)
@@ -394,7 +399,8 @@ class NetBoxRestClient(NetBoxClientBase):
             True if deletion was successful, False otherwise
 
         Raises:
-            httpx.HTTPStatusError: If the request fails
+            httpx.HTTPStatusError: If NetBox returns a non-success response. A transport
+                failure raises httpx.RequestError.
         """
         url = f"{self._build_url(endpoint)}bulk/"
         data = [{"id": id} for id in ids]
@@ -413,7 +419,8 @@ class NetBoxRestClient(NetBoxClientBase):
             Dict with an 'actions' key containing field schemas for POST and other methods.
 
         Raises:
-            httpx.HTTPStatusError: If the request fails
+            httpx.HTTPStatusError: If NetBox returns a non-success response. A transport
+                failure raises httpx.RequestError.
         """
         url = self._build_url(endpoint)
         response = self.session.options(url)
