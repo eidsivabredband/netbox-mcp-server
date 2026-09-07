@@ -10,6 +10,43 @@ from typing import Any
 
 import httpx
 
+# An error body is a diagnostic, not a payload: NetBox answers a bad request with a short
+# JSON detail, but a misconfigured proxy can answer with a whole HTML page.
+_MAX_ERROR_BODY = 2000
+_TRUNCATION_MARKER = " ... (truncated)"
+# Whitespace is collapsed over a bounded slice rather than the whole body: tokenising a
+# multi-megabyte error page to produce 2000 characters is work worth skipping. The slack
+# leaves room for whitespace to vanish and the result still to fill the cap.
+_ERROR_BODY_SCAN = _MAX_ERROR_BODY * 4
+
+
+def _error_detail(response: httpx.Response) -> str:
+    """The response body as one line, capped so an HTML error page cannot flood a message.
+
+    Whitespace is collapsed because this text lands in a log line: an error page would
+    otherwise turn a single failure into dozens of lines and break line-oriented parsing.
+    """
+    detail = " ".join(response.text[:_ERROR_BODY_SCAN].split())
+    if len(detail) > _MAX_ERROR_BODY:
+        detail = detail[: _MAX_ERROR_BODY - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+    return detail
+
+
+def _raise_for_status(response: httpx.Response) -> None:
+    """Raise on an error response, carrying the server's own explanation in the message.
+
+    httpx.Response.raise_for_status reports the status line alone, which discards the body
+    NetBox uses to say why - the permission detail behind a 403, the field errors behind a 400.
+    """
+    if response.is_success:
+        return
+    status = f"{response.status_code} {response.reason_phrase}".strip()
+    message = f"{response.request.method} {response.request.url} failed {status}"
+    detail = _error_detail(response)
+    if detail:
+        message = f"{message}: {detail}"
+    raise httpx.HTTPStatusError(message, request=response.request, response=response)
+
 
 class NetBoxClientBase(abc.ABC):
     """
@@ -241,7 +278,7 @@ class NetBoxRestClient(NetBoxClientBase):
             fallback_url = self._build_url(fallback_endpoint, id)
             response = self.session.get(fallback_url, params=params)
 
-        response.raise_for_status()
+        _raise_for_status(response)
 
         return response.json()
 
@@ -257,12 +294,15 @@ class NetBoxRestClient(NetBoxClientBase):
             The created object as a dict
 
         Raises:
-            httpx.HTTPStatusError: If the request fails
+            ValueError: If NetBox returns a non-success response, carrying the status
+                code and the response body truncated past _MAX_ERROR_BODY characters.
+                Unlike the other methods here, which raise httpx.HTTPStatusError. A
+                transport failure raises httpx.RequestError, as it does everywhere else.
         """
         url = self._build_url(endpoint)
         response = self.session.post(url, json=data)
         if not response.is_success:
-            raise ValueError(f"POST {url} failed {response.status_code}: {response.text}")
+            raise ValueError(f"POST {url} failed {response.status_code}: {_error_detail(response)}")
         return response.json()
 
     def update(self, endpoint: str, id: int, data: dict[str, Any]) -> dict[str, Any]:
@@ -282,7 +322,7 @@ class NetBoxRestClient(NetBoxClientBase):
         """
         url = self._build_url(endpoint, id)
         response = self.session.patch(url, json=data)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     def delete(self, endpoint: str, id: int) -> bool:
@@ -301,7 +341,7 @@ class NetBoxRestClient(NetBoxClientBase):
         """
         url = self._build_url(endpoint, id)
         response = self.session.delete(url)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.status_code == 204
 
     def bulk_create(self, endpoint: str, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -320,7 +360,7 @@ class NetBoxRestClient(NetBoxClientBase):
         """
         url = f"{self._build_url(endpoint)}bulk/"
         response = self.session.post(url, json=data)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     def bulk_update(self, endpoint: str, data: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -339,7 +379,7 @@ class NetBoxRestClient(NetBoxClientBase):
         """
         url = f"{self._build_url(endpoint)}bulk/"
         response = self.session.patch(url, json=data)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json()
 
     def bulk_delete(self, endpoint: str, ids: list[int]) -> bool:
@@ -359,7 +399,7 @@ class NetBoxRestClient(NetBoxClientBase):
         url = f"{self._build_url(endpoint)}bulk/"
         data = [{"id": id} for id in ids]
         response = self.session.delete(url, json=data)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.status_code == 204
 
     def options(self, endpoint: str) -> dict[str, Any]:
@@ -377,5 +417,5 @@ class NetBoxRestClient(NetBoxClientBase):
         """
         url = self._build_url(endpoint)
         response = self.session.options(url)
-        response.raise_for_status()
+        _raise_for_status(response)
         return response.json().get("actions", {})
